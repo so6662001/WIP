@@ -545,6 +545,59 @@ def case_pg_in_then_sale_out():
     return db, "IOBill", "SO1", -1
 
 
+def make_chain_db():
+    """业务场景：热卷 -> 酸洗 -> 冷轧 -> 镀锌 -> 分剪 -> 制管。
+       每道工序 PGBill 的 (WHID, PRDTID, CLRID) 都可以不同。"""
+    db = DB()
+    # 起点：采购入库 (W0, A0, Ca) -- 热卷
+    db.add_ab(BillType="PIBill", BillID="PI1", DC=1, WHID="W0", PRDTID="A0", CLRID="Ca",
+              ITMID="I1", LTime="2024-01-01 09:00:00")
+    db.add_pi(BillID="PI1", ITMID="I1", IsNew=1, WMSPIBILLID="")
+
+    # 酸洗 PG_S: 原料 (W0, A0, Ca) -> 产出 (W1, A1, Ca)  -- CLRID 不变
+    db.add_ab(BillType="PGBill", BillID="PG_S", DC=-1, WHID="W0", PRDTID="A0", CLRID="Ca",
+              ITMID="I1", LTime="2024-01-02 09:00:00")
+    db.add_ab(BillType="PGBill", BillID="PG_S", DC=1,  WHID="W1", PRDTID="A1", CLRID="Ca",
+              ITMID="I2", LTime="2024-01-02 10:00:00")
+
+    # 冷轧 PG_C: 原料 (W1, A1, Ca) -> 产出 (W2, A2, Cb)  -- CLRID 改变
+    db.add_ab(BillType="PGBill", BillID="PG_C", DC=-1, WHID="W1", PRDTID="A1", CLRID="Ca",
+              ITMID="I2", LTime="2024-01-03 09:00:00")
+    db.add_ab(BillType="PGBill", BillID="PG_C", DC=1,  WHID="W2", PRDTID="A2", CLRID="Cb",
+              ITMID="I3", LTime="2024-01-03 10:00:00")
+
+    # 镀锌 PG_G: 原料 (W2, A2, Cb) -> 产出 (W3, A3, Cb)  -- CLRID 不变
+    db.add_ab(BillType="PGBill", BillID="PG_G", DC=-1, WHID="W2", PRDTID="A2", CLRID="Cb",
+              ITMID="I3", LTime="2024-01-04 09:00:00")
+    db.add_ab(BillType="PGBill", BillID="PG_G", DC=1,  WHID="W3", PRDTID="A3", CLRID="Cb",
+              ITMID="I4", LTime="2024-01-04 10:00:00")
+
+    # 分剪 PG_F: 原料 (W3, A3, Cb) -> 产出 (W4, A4, Cc)
+    db.add_ab(BillType="PGBill", BillID="PG_F", DC=-1, WHID="W3", PRDTID="A3", CLRID="Cb",
+              ITMID="I4", LTime="2024-01-05 09:00:00")
+    db.add_ab(BillType="PGBill", BillID="PG_F", DC=1,  WHID="W4", PRDTID="A4", CLRID="Cc",
+              ITMID="I5", LTime="2024-01-05 10:00:00")
+
+    # 制管 PG_T: 原料 (W4, A4, Cc) -> 产出 (W5, A5, Cc)
+    db.add_ab(BillType="PGBill", BillID="PG_T", DC=-1, WHID="W4", PRDTID="A4", CLRID="Cc",
+              ITMID="I5", LTime="2024-01-06 09:00:00")
+    db.add_ab(BillType="PGBill", BillID="PG_T", DC=1,  WHID="W5", PRDTID="A5", CLRID="Cc",
+              ITMID="I6", LTime="2024-01-06 10:00:00")
+
+    # 最终销售出库 (W5, A5, Cc)
+    db.add_ab(BillType="IOBill", BillID="SO1", DC=-1, WHID="W5", PRDTID="A5", CLRID="Cc",
+              ITMID="I6", LTime="2024-01-07 09:00:00")
+    return db
+
+
+def case_chain_pg_s():     return make_chain_db(), "PGBill", "PG_S", -1
+def case_chain_pg_c():     return make_chain_db(), "PGBill", "PG_C", -1
+def case_chain_pg_g():     return make_chain_db(), "PGBill", "PG_G", -1
+def case_chain_pg_f():     return make_chain_db(), "PGBill", "PG_F", -1
+def case_chain_pg_t():     return make_chain_db(), "PGBill", "PG_T", -1
+def case_chain_so1():      return make_chain_db(), "IOBill", "SO1", -1
+
+
 def case_pg_in_then_sale_out_multi_loc():
     """同一张销售单据有多个明细（多 (W,P,C)），每条都需匹配上游 PGBill 入库。"""
     db = DB()
@@ -635,6 +688,12 @@ def main():
         ("case_pg_in_then_sale_out",    case_pg_in_then_sale_out),
         ("case_pg_in_then_sale_out_multi_loc", case_pg_in_then_sale_out_multi_loc),
         ("case_iibill_seed_in_dc1_only", case_iibill_seed_in_dc1_only),
+        ("case_chain_pg_s",             case_chain_pg_s),
+        ("case_chain_pg_c",             case_chain_pg_c),
+        ("case_chain_pg_g",             case_chain_pg_g),
+        ("case_chain_pg_f",             case_chain_pg_f),
+        ("case_chain_pg_t",             case_chain_pg_t),
+        ("case_chain_so1",              case_chain_so1),
         ("case_grade_cap",              case_grade_cap),
     ]
     fails = sum(0 if run_one(n, b) else 1 for n, b in cases)
