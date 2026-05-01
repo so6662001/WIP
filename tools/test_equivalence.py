@@ -266,18 +266,31 @@ def original(db: DB, BillType, BillID, DC, dLtime, grade, rsLTime_index, depth=0
 # 优化算法：等价于原算法，但用预加载缓存避免任何 SQL 往返
 # ------------------------------------------------------------
 class Cache:
+    """与 VB 优化版完全等价的缓存模型。
+       每个种子 (BT,BID,DC) 可以对应多个 (W,P,C) 库位（多明细行）。"""
     def __init__(self, db: DB):
-        # 1. 同 (WHID,PRDTID,CLRID) 的入库候选，键 = (WHID,PRDTID,CLRID)
-        self.by_loc: dict = defaultdict(list)
+        # 1. 同 (WHID,PRDTID,CLRID) 的"DC=1 候选"
+        self.by_loc: dict = defaultdict(dict)
+        # by_loc[locKey][(BT,BID,DC)] = MaxLT
         for r in db.ab_whi:
             if r["BillType"] == "ACF" or r["DC"] != 1:
                 continue
-            self.by_loc[(r["WHID"], r.get("PRDTID") or "", r["CLRID"])].append(r)
+            k = (r["WHID"], r.get("PRDTID") or "", r["CLRID"])
+            ck = (r["BillType"], r["BillID"], r["DC"])
+            cur = self.by_loc[k].get(ck)
+            if r["LTime"] is not None and (cur is None or r["LTime"] > cur):
+                self.by_loc[k][ck] = r["LTime"]
+            elif ck not in self.by_loc[k]:
+                self.by_loc[k][ck] = cur
 
-        # 2. (BillType,BillID,DC) -> seed row（取第一条；只用其 WHID/PRDTID/CLRID）
-        self.seed_lookup: dict = {}
+        # 2. (BillType,BillID,DC) -> set of locKey
+        #    覆盖 ALL DC（含 DC=-1 的种子），排除 ACF
+        self.seed_locs: dict = defaultdict(set)
         for r in db.ab_whi:
-            self.seed_lookup.setdefault((r["BillType"], r["BillID"], r["DC"]), r)
+            if r["BillType"] == "ACF":
+                continue
+            self.seed_locs[(r["BillType"], r["BillID"], r["DC"])].add(
+                (r["WHID"], r.get("PRDTID") or "", r["CLRID"]))
 
         # 3. (BillType,BillID,DC=1) 的 MAX(LTime) —— 用于 Edge 的 LTime
         self.max_lt_dc1: dict = defaultdict(lambda: None)
@@ -335,20 +348,16 @@ class Cache:
 
 
 def candidates_for(cache: Cache, BillType, BillID, DC):
-    seed = cache.seed_lookup.get((BillType, BillID, DC))
-    if seed is None:
-        return []
-    key = (seed["WHID"], seed.get("PRDTID") or "", seed["CLRID"])
-    grouped = defaultdict(list)
-    for r in cache.by_loc.get(key, []):
-        if (r["BillType"], r["BillID"], r["DC"]) == (BillType, BillID, DC):
-            continue
-        grouped[(r["BillType"], r["BillID"], r["DC"])].append(r)
-    out = []
-    for (bt, bi, dc), rs in grouped.items():
-        max_lt = max((x["LTime"] for x in rs if x["LTime"] is not None), default=None)
-        out.append({"BillType": bt, "BillID": bi, "DC": dc, "LTime": max_lt})
-    return out
+    locs = cache.seed_locs.get((BillType, BillID, DC), set())
+    out = {}
+    for k in locs:
+        for (bt, bi, dc), max_lt in cache.by_loc.get(k, {}).items():
+            if (bt, bi, dc) == (BillType, BillID, DC):
+                continue
+            cur = out.get((bt, bi, dc))
+            if cur is None or (max_lt is not None and (cur["LTime"] is None or max_lt > cur["LTime"])):
+                out[(bt, bi, dc)] = {"BillType": bt, "BillID": bi, "DC": dc, "LTime": max_lt}
+    return list(out.values())
 
 
 def optimized(cache: Cache, BillType, BillID, DC, dLtime, grade, depth=0) -> tuple:
@@ -523,6 +532,44 @@ def case_null_prdtid():
     return db, "PGBill", "P1", -1
 
 
+def case_pg_in_then_sale_out():
+    """用户报告的场景：PGBill 加工入库 DC=1，再销售 DC=-1。
+       销售出库的 LTime2Grade 应为 1（找到上游 PGBill 入库），不能是 0。"""
+    db = DB()
+    # 销售出库 (seed): 用户产品 A 在仓库 W1
+    db.add_ab(BillType="IOBill", BillID="SO1", DC=-1, WHID="W1", PRDTID="A", CLRID="C1",
+              ITMID="I1", LTime="2024-03-10 10:00:00")
+    # 上游：PGBill 加工入库 同 (W1, A, C1)
+    db.add_ab(BillType="PGBill", BillID="PG1", DC=1, WHID="W1", PRDTID="A", CLRID="C1",
+              ITMID="I1", LTime="2024-03-05 09:00:00")
+    return db, "IOBill", "SO1", -1
+
+
+def case_pg_in_then_sale_out_multi_loc():
+    """同一张销售单据有多个明细（多 (W,P,C)），每条都需匹配上游 PGBill 入库。"""
+    db = DB()
+    db.add_ab(BillType="IOBill", BillID="SO1", DC=-1, WHID="W1", PRDTID="A", CLRID="C1",
+              ITMID="I1", LTime="2024-04-10 10:00:00")
+    db.add_ab(BillType="IOBill", BillID="SO1", DC=-1, WHID="W2", PRDTID="B", CLRID="C2",
+              ITMID="I2", LTime="2024-04-10 10:00:00")
+    db.add_ab(BillType="PGBill", BillID="PG1", DC=1, WHID="W1", PRDTID="A", CLRID="C1",
+              ITMID="I1", LTime="2024-04-05 09:00:00")
+    db.add_ab(BillType="PGBill", BillID="PG2", DC=1, WHID="W2", PRDTID="B", CLRID="C2",
+              ITMID="I2", LTime="2024-04-06 09:00:00")
+    return db, "IOBill", "SO1", -1
+
+
+def case_iibill_seed_in_dc1_only():
+    """边界：种子 (DC=-1) 在 AB_WHI 中存在，但 BillType=icbill 既有 DC=1 又有 DC=-1。
+       验证 dictSeedLocs 必须覆盖 ALL DC，否则 DC=-1 种子拿不到库位。"""
+    db = DB()
+    db.add_ab(BillType="icbill", BillID="IC1", DC=-1, WHID="W1", PRDTID="A", CLRID="C1",
+              ITMID="I1", LTime="2024-05-10 10:00:00")
+    db.add_ab(BillType="PGBill", BillID="PG1", DC=1, WHID="W1", PRDTID="A", CLRID="C1",
+              ITMID="I1", LTime="2024-05-05 09:00:00")
+    return db, "icbill", "IC1", -1
+
+
 def case_grade_cap():
     """构造一个会触发 grade>150 的链；测试两边都尊重截断"""
     db = DB()
@@ -585,6 +632,9 @@ def main():
         ("case_pibill_skip_when_no_isnew", case_pibill_skip_when_no_isnew),
         ("case_fallback_dltime",        case_fallback_dltime),
         ("case_null_prdtid",            case_null_prdtid),
+        ("case_pg_in_then_sale_out",    case_pg_in_then_sale_out),
+        ("case_pg_in_then_sale_out_multi_loc", case_pg_in_then_sale_out_multi_loc),
+        ("case_iibill_seed_in_dc1_only", case_iibill_seed_in_dc1_only),
         ("case_grade_cap",              case_grade_cap),
     ]
     fails = sum(0 if run_one(n, b) else 1 for n, b in cases)

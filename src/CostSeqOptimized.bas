@@ -165,15 +165,17 @@ Private Sub meBuildLTime2_Optimized(ByVal objDS As HHDataService.sysDataService,
 
     '--- 缓存字典 -------------------------------------------------------------
     ' 键格式说明：
-    '   dictSeed:    "BillType|BillID|DC"  -> "WHID|PRDTID|CLRID"
+    '   dictSeedLocs: "BillType|BillID|DC" -> Collection of "WHID|PRDTID|CLRID"
+    '                 注意：必须覆盖 ALL DC（含 DC=-1 的种子），且一张单据可能涉及多 (W,P,C)。
     '   dictByLoc:   "WHID|PRDTID|CLRID"   -> Collection of "BillType|BillID|DC|MaxLTimeYYYYMMDDHHMMSS"
+    '                 仅装 DC=1 候选，BillType<>'ACF'。
     '   dictDcN1:    "BillType|BillID"     -> "MaxLT|MaxLT2|MaxLT2Grade"  （DC=-1 的聚合）
     '   dictMaxLTd1: "BillType|BillID"     -> MaxLT (Date)                 （DC=1 的 MAX(LTime)）
     '   dictPiNew:   "PIBill BillID"       -> True                         （存在 IsNew=1 且 WMSPI=''）
     '   dictPiAgg:   "PIBill BillID"       -> "MaxLT|MaxLT2|MaxLT2Grade"   （AB_WHI JOIN PI_I 的聚合）
     '   dictRsLTime: "BillType|BillID"     -> Date                         （兜底用 MAX(LTime) DC=-1）
     '   dictComputed:"BillType|BillID|DC"  -> "LTime2|Grade"               （递归过程即时回填）
-    Dim dictSeed     As Object
+    Dim dictSeedLocs As Object
     Dim dictByLoc    As Object
     Dim dictDcN1     As Object
     Dim dictMaxLTd1  As Object
@@ -184,7 +186,7 @@ Private Sub meBuildLTime2_Optimized(ByVal objDS As HHDataService.sysDataService,
 
     On Error GoTo ErrH
 
-    Set dictSeed = CreateObject("Scripting.Dictionary")
+    Set dictSeedLocs = CreateObject("Scripting.Dictionary")
     Set dictByLoc = CreateObject("Scripting.Dictionary")
     Set dictDcN1 = CreateObject("Scripting.Dictionary")
     Set dictMaxLTd1 = CreateObject("Scripting.Dictionary")
@@ -194,8 +196,29 @@ Private Sub meBuildLTime2_Optimized(ByVal objDS As HHDataService.sysDataService,
     Set dictComputed = CreateObject("Scripting.Dictionary")
 
     '--------------------------------------------------------------------------
-    ' P1. dictByLoc + dictSeed + dictMaxLTd1
-    '     候选行：BillType<>'ACF' AND DC=1 区间内
+    ' P1. 装 dictSeedLocs：每个 (BillType,BillID,DC) -> 它涉及的所有 (W,P,C) 库位
+    '     必须覆盖 ALL DC（含 DC=-1 的种子），所以这里没有 DC 过滤。
+    '--------------------------------------------------------------------------
+    SQL = "SELECT DISTINCT BillType, BillID, DC, WHID, ISNULL(PRDTID,'') AS PRDTID, CLRID" & vbCrLf & _
+          "FROM   AB_WHI WITH(NOLOCK)" & vbCrLf & _
+          "WHERE  " & strDateWhere & " AND BillType<>'ACF'"
+    Set rs = objDS.OpenRecordsetBySQL(SQL, True, True)
+    Do While Not rs.EOF
+        Dim sLocKey  As String
+        Dim sBillKey As String
+        sLocKey = rs.Fields("WHID").Value & "|" & rs.Fields("PRDTID").Value & "|" & rs.Fields("CLRID").Value
+        sBillKey = rs.Fields("BillType").Value & "|" & rs.Fields("BillID").Value & "|" & CStr(rs.Fields("DC").Value)
+
+        If Not dictSeedLocs.Exists(sBillKey) Then
+            dictSeedLocs.Add sBillKey, New Collection
+        End If
+        dictSeedLocs(sBillKey).Add sLocKey
+        rs.MoveNext
+    Loop
+    Call objDS.rs_Close(rs)
+
+    '--------------------------------------------------------------------------
+    ' P1b. 装 dictByLoc + dictMaxLTd1：DC=1 候选
     '--------------------------------------------------------------------------
     SQL = "SELECT BillType, BillID, DC, WHID, ISNULL(PRDTID,'') AS PRDTID, CLRID, " & _
           "       MAX(LTime) AS MaxLT" & vbCrLf & _
@@ -204,24 +227,19 @@ Private Sub meBuildLTime2_Optimized(ByVal objDS As HHDataService.sysDataService,
           "GROUP BY BillType, BillID, DC, WHID, ISNULL(PRDTID,''), CLRID"
     Set rs = objDS.OpenRecordsetBySQL(SQL, True, True)
     Do While Not rs.EOF
-        Dim sLocKey As String
-        Dim sBillKey As String
-        Dim sCand   As String
-        sLocKey = rs.Fields("WHID").Value & "|" & rs.Fields("PRDTID").Value & "|" & rs.Fields("CLRID").Value
-        sBillKey = rs.Fields("BillType").Value & "|" & rs.Fields("BillID").Value & "|" & CStr(rs.Fields("DC").Value)
-        sCand = sBillKey & "|"
+        Dim sLocKey2 As String
+        Dim sCand    As String
+        sLocKey2 = rs.Fields("WHID").Value & "|" & rs.Fields("PRDTID").Value & "|" & rs.Fields("CLRID").Value
+        sCand = rs.Fields("BillType").Value & "|" & rs.Fields("BillID").Value & "|" & _
+                CStr(rs.Fields("DC").Value) & "|"
         If Not IsNull(rs.Fields("MaxLT").Value) Then
             sCand = sCand & Format$(rs.Fields("MaxLT").Value, "yyyy-MM-dd hh:mm:ss")
         End If
 
-        If Not dictByLoc.Exists(sLocKey) Then
-            dictByLoc.Add sLocKey, New Collection
+        If Not dictByLoc.Exists(sLocKey2) Then
+            dictByLoc.Add sLocKey2, New Collection
         End If
-        dictByLoc(sLocKey).Add sCand
-
-        If Not dictSeed.Exists(sBillKey) Then
-            dictSeed.Add sBillKey, sLocKey
-        End If
+        dictByLoc(sLocKey2).Add sCand
 
         If Not IsNull(rs.Fields("MaxLT").Value) Then
             Dim sBT2 As String
@@ -367,7 +385,7 @@ Private Sub meBuildLTime2_Optimized(ByVal objDS As HHDataService.sysDataService,
         Dim vLT As Variant
         vLT = Empty
         Call meRecurseInMem(sBT0, sBI0, intDC0, vLT, dblGr, _
-                            dictByLoc, dictSeed, dictDcN1, dictMaxLTd1, _
+                            dictByLoc, dictSeedLocs, dictDcN1, dictMaxLTd1, _
                             dictPiNew, dictPiAgg, dictRsLTime, dictComputed)
 
         If IsDate(vLT) Then
@@ -474,7 +492,7 @@ Private Sub meRecurseInMem(ByVal sBillType As String, _
                            ByRef vLT As Variant, _
                            ByRef dblGr As Double, _
                            ByVal dictByLoc As Object, _
-                           ByVal dictSeed As Object, _
+                           ByVal dictSeedLocs As Object, _
                            ByVal dictDcN1 As Object, _
                            ByVal dictMaxLTd1 As Object, _
                            ByVal dictPiNew As Object, _
@@ -486,22 +504,52 @@ Private Sub meRecurseInMem(ByVal sBillType As String, _
 
     Dim sSeedKey As String
     sSeedKey = sBillType & "|" & sBillID & "|" & CStr(intDC)
-    If Not dictSeed.Exists(sSeedKey) Then
-        ' 该种子不在候选 (DC=1) 中是正常情况：本身可能就是 DC=-1 的种子
-        ' 仍需走"段4 兜底" 的逻辑：但段4 仅在存在候选时触发，所以无候选直接返回
-    End If
 
-    Dim sLocKey As String
-    Dim collCands As Collection
-    Dim hasCands As Boolean
-
-    ' 当前种子的 (WHID,PRDTID,CLRID) —— 原算法是从 AB_WHI 直接读这一行，
-    ' 这里我们先从 dictSeed 中找；找不到就读 dictByLoc（可能 DC=-1 行）
-    If dictSeed.Exists(sSeedKey) Then
-        sLocKey = dictSeed(sSeedKey)
+    ' 当前种子的所有 (WHID,PRDTID,CLRID) 库位
+    ' 关键：必须从 dictSeedLocs（覆盖 ALL DC）中取，而不是从只装 DC=1 的字典中取
+    Dim collLocs As Collection
+    If dictSeedLocs.Exists(sSeedKey) Then
+        Set collLocs = dictSeedLocs(sSeedKey)
     Else
-        sLocKey = ""
+        Set collLocs = New Collection
     End If
+
+    Dim hasCands As Boolean
+    hasCands = False
+
+    ' 候选行用 Dictionary 按 "BillType|BillID|DC" 去重并取 MAX(LTime)
+    ' 同一 (BT,BID,DC) 可能因为多库位被收到多次
+    Dim dctCand As Object
+    Set dctCand = CreateObject("Scripting.Dictionary")
+
+    Dim vLoc As Variant
+    Dim v    As Variant
+    For Each vLoc In collLocs
+        If dictByLoc.Exists(CStr(vLoc)) Then
+            For Each v In dictByLoc(CStr(vLoc))
+                Dim parts() As String
+                parts = Split(CStr(v), "|")
+                If parts(0) = sBillType And parts(1) = sBillID And parts(2) = CStr(intDC) Then
+                Else
+                    Dim ck As String
+                    ck = parts(0) & "|" & parts(1) & "|" & parts(2)
+                    If Not dctCand.Exists(ck) Then
+                        dctCand.Add ck, CStr(v)
+                        hasCands = True
+                    Else
+                        ' 取 MAX(LTime)
+                        Dim oldLT As String
+                        Dim newLT As String
+                        Dim oldP() As String
+                        oldP = Split(CStr(dctCand(ck)), "|")
+                        oldLT = oldP(3)
+                        newLT = parts(3)
+                        If newLT > oldLT Then dctCand(ck) = CStr(v)
+                    End If
+                End If
+            Next v
+        End If
+    Next vLoc
 
     Dim pgs As Collection
     Dim ics As Collection
@@ -509,29 +557,22 @@ Private Sub meRecurseInMem(ByVal sBillType As String, _
     Set pgs = New Collection
     Set ics = New Collection
     Set pis = New Collection
-    hasCands = False
 
-    If sLocKey <> "" And dictByLoc.Exists(sLocKey) Then
-        Set collCands = dictByLoc(sLocKey)
-        Dim v As Variant
-        For Each v In collCands
-            ' v 形如 "BillType|BillID|DC|YYYY-MM-DD hh:mm:ss"
-            Dim parts() As String
-            parts = Split(CStr(v), "|")
-            ' 跳过自身
-            If Not (parts(0) = sBillType And parts(1) = sBillID And parts(2) = CStr(intDC)) Then
-                hasCands = True
-                Select Case parts(0)
-                    Case "PGBill"
-                        pgs.Add v
-                    Case "jgicbill", "icbill", "icbill2", "ICWHSecBill", "icbill3", "isbill", "ipbill"
-                        ics.Add v
-                    Case "PIBill"
-                        pis.Add v
-                End Select
-            End If
-        Next v
-    End If
+    Dim kCand As Variant
+    For Each kCand In dctCand.Keys
+        Dim sV As String
+        sV = CStr(dctCand(CStr(kCand)))
+        Dim p0() As String
+        p0 = Split(sV, "|")
+        Select Case p0(0)
+            Case "PGBill"
+                pgs.Add sV
+            Case "jgicbill", "icbill", "icbill2", "ICWHSecBill", "icbill3", "isbill", "ipbill"
+                ics.Add sV
+            Case "PIBill"
+                pis.Add sV
+        End Select
+    Next kCand
 
     Dim tGrade As Integer
     tGrade = 0
@@ -575,7 +616,7 @@ Private Sub meRecurseInMem(ByVal sBillType As String, _
                     If meGT(vMaxLT, vLT) Then vLT = vMaxLT
                 End If
                 Call meRecurseInMem("PGBill", p1(1), -1, vLT, dblGr, _
-                                    dictByLoc, dictSeed, dictDcN1, dictMaxLTd1, _
+                                    dictByLoc, dictSeedLocs, dictDcN1, dictMaxLTd1, _
                                     dictPiNew, dictPiAgg, dictRsLTime, dictComputed)
             End If
         Next v
@@ -634,7 +675,7 @@ Private Sub meRecurseInMem(ByVal sBillType As String, _
                 If Not blnSet Then
                     If IsDate(vMaxLTx) And meGT(vMaxLTx, vLT) Then vLT = vMaxLTx
                     Call meRecurseInMem(p2(0), p2(1), -1, vLT, dblGr, _
-                                        dictByLoc, dictSeed, dictDcN1, dictMaxLTd1, _
+                                        dictByLoc, dictSeedLocs, dictDcN1, dictMaxLTd1, _
                                         dictPiNew, dictPiAgg, dictRsLTime, dictComputed)
                 End If
             End If
@@ -686,7 +727,7 @@ Private Sub meRecurseInMem(ByVal sBillType As String, _
                 If IsDate(vItLT) And meGT(vItLT, vLT) Then vLT = vItLT
                 If tGrade = 0 Then dblGr = dblGr + 1
                 Call meRecurseInMem("PIBill", p3(1), -1, vLT, dblGr, _
-                                    dictByLoc, dictSeed, dictDcN1, dictMaxLTd1, _
+                                    dictByLoc, dictSeedLocs, dictDcN1, dictMaxLTd1, _
                                     dictPiNew, dictPiAgg, dictRsLTime, dictComputed)
             End If
 NextPI:
