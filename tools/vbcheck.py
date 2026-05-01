@@ -70,7 +70,8 @@ def check(path: Path) -> int:
     label_re = re.compile(r"^([A-Za-z_]\w*):\s*$")
     goto_re = re.compile(r"\b(?:GoTo|GoSub)\s+([A-Za-z_]\w*|\d+)\b", re.IGNORECASE)
     onerr_re = re.compile(r"\bOn\s+Error\s+GoTo\s+([A-Za-z_]\w*|\d+|\-1)\b", re.IGNORECASE)
-    dim_re = re.compile(r"^(?:Dim|ReDim|Static|Const)\s+([A-Za-z_]\w*)", re.IGNORECASE)
+    dim_re = re.compile(r"^(?:Dim|ReDim(?:\s+Preserve)?|Static|Const)\s+([A-Za-z_]\w*)",
+                        re.IGNORECASE)
 
     for ln, raw, line in lines:
         if not line:
