@@ -5,6 +5,14 @@
 - **C1**：DAL 内多次 GROUP BY 大表合并为 1 次预聚合（SSBillByDateDAL 为例，其他 DAL 同模式）
 - **C2**：`CVouService.SaveDoc` ADO `Recordset.AddNew/Update` → 批量 `INSERT VALUES`（可选，最大改动面）
 
+## ⚠️ 跨工程架构
+
+| 文件 / 修改 | 工程 |
+|---|---|
+| `VouBatchWriter.bas` | **工程 C**（POPBus3GL2Service）— SaveDoc 内部调用 |
+| `SSBillByDateDAL` 等 DAL 改造（C1）| **工程 B**（POPBus3GL2IDC）— DAL 类在此 |
+| `CVouService.SaveDoc` 改造（C2）| **工程 C** |
+
 ## 前置依赖
 
 - PR-1 + PR-2 + PR-3 已合入
@@ -175,7 +183,7 @@ End Sub
 ### 思路
 
 不修改 SaveDoc 接口。在 SaveDoc 内部判断：
-- `VouBatchOps.InBatchMode=True` 且当前数据库连接事务正在进行 → 调用新 helper `WriteVouDirect`，绕过 `sysDS.SaveData` 用 INSERT VALUES 批量写入
+- `Me.BatchMode=True`（PR-3 引入的 CVouService 属性，由工程 A 通过 IDCService→t_FVou_M→CVouService 链传递）→ 调用新 helper `InsertSingleRow / InsertMultiRows`，绕过 `sysDS.SaveData` 用 INSERT VALUES 批量写入
 - 否则保持原 `sysDS.SaveData` 路径
 
 ### 实现
@@ -250,20 +258,22 @@ End Function
 ### SaveDoc 集成
 
 ```vb
-' 4. 保存主表数据
-If VouBatchOps.InBatchMode Then
-    Call VouBatchWriter.WriteMain(sysDS, MainData, "FVou_M" & IIf(isSaveToTransitionalTable, "_T", ""))
+' 4. 保存主表数据（工程 C 内）
+If Me.BatchMode Then
+    Call VouBatchWriter.InsertSingleRow(sysDS, MainData, "FVou_M" & IIf(isSaveToTransitionalTable, "_T", ""))
 Else
     Call sysDS.SaveData(MainData, "BillID", ..., "FVou_M" & IIf(isSaveToTransitionalTable, "_T", ""))
 End If
 
 ' 4. 保存明细
-If VouBatchOps.InBatchMode Then
-    Call VouBatchWriter.WriteItemsBatch(sysDS, rsTmp, "FVou_I" & IIf(isSaveToTransitionalTable, "_T", ""), 200)
+If Me.BatchMode Then
+    Call VouBatchWriter.InsertMultiRows(sysDS, rsTmp, "FVou_I" & IIf(isSaveToTransitionalTable, "_T", ""), 200)
 Else
     Call sysDS.SaveData(rsTmp, "BillID,ITMID", ..., "FVou_I" & IIf(isSaveToTransitionalTable, "_T", ""))
 End If
 ```
+
+> `Me.BatchMode` 通过 PR-3 Patch 2 的属性链传递：`A→IDCService.BatchMode→t_FVou_M.BatchMode→CVouService.BatchMode`。CVouService 也需要 PR-3 Patch 2c 添加的 `Public BatchMode As Boolean` 属性。
 
 ### 等价性风险
 
