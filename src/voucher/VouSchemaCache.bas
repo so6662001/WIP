@@ -49,6 +49,47 @@ End Property
 
 
 '==============================================================================
+' Public：懒加载入口（跨工程友好）
+' 工程 C (POPBus3GL2Service) 内 megetDocByID 调用本函数自动 LoadAll
+'==============================================================================
+Public Sub EnsureLoaded(ByVal objDS As HHDataService.sysDataService)
+    If m_blnLoaded Then Exit Sub
+    Call LoadAll(objDS)
+End Sub
+
+
+'==============================================================================
+' Public：懒加载并 Clone（一步到位）
+'   返回 Nothing 表示首次 LoadAll 失败（DB 异常）；调用方应回退原 SELECT TOP 0
+'==============================================================================
+Public Function CloneMainEmptyOrLoad(ByVal objDS As HHDataService.sysDataService) As ADODB.Recordset
+    On Error Resume Next
+    Call EnsureLoaded(objDS)
+    On Error GoTo 0
+    If Not m_blnLoaded Then Exit Function
+    Set CloneMainEmptyOrLoad = CloneMainEmpty()
+End Function
+
+
+Public Function CloneItemsEmptyOrLoad(ByVal objDS As HHDataService.sysDataService) As ADODB.Recordset
+    On Error Resume Next
+    Call EnsureLoaded(objDS)
+    On Error GoTo 0
+    If Not m_blnLoaded Then Exit Function
+    Set CloneItemsEmptyOrLoad = CloneItemsEmpty()
+End Function
+
+
+Public Function CloneIItemsEmptyOrLoad(ByVal objDS As HHDataService.sysDataService) As ADODB.Recordset
+    On Error Resume Next
+    Call EnsureLoaded(objDS)
+    On Error GoTo 0
+    If Not m_blnLoaded Then Exit Function
+    Set CloneIItemsEmptyOrLoad = CloneIItemsEmpty()
+End Function
+
+
+'==============================================================================
 ' Public：在 batch 入口扫描 schema 模板（一次性）
 '==============================================================================
 Public Sub LoadAll(ByVal objDS As HHDataService.sysDataService)

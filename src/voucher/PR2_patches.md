@@ -3,38 +3,25 @@
 PR-2 在 PR-1 基础上继续优化。涵盖：
 
 - **A2**：getInfoByID 空 schema 缓存（消除 30 万次 SELECT TOP 0）
-- **D1**：`meCreVouForXX` 主查询去掉 `SELECT m.*` 改投影列（减少网络流量）
+- ~~**D1**：主查询投影列~~ **已撤销**（见 Patch 3）
 
 ## 前置依赖
 
 - PR-1 已合入（VouMetaCache + VouCacheHelpers）
-- 新增 `VouSchemaCache.bas`
+- 新增 `VouSchemaCache.bas` —— **只加到工程 C（POPBus3GL2Service）**
+  原因：`megetDocByID` / `getInfoByID` 是 t_FVou_M 类的方法，属于工程 C；
+  schema 是 SQL Server 表的字段定义，只在 C 工程内创建空 Recordset 用于
+  `sysDS.SaveData` 写入。其他工程不需要此缓存。
 
-## Patch 1：在 `cMthCstAccGL2.meCreateVou` 入口加载 schema 缓存
+## Patch 1：~~`cMthCstAccGL2.meCreateVou` 入口加载 schema 缓存~~（懒加载替代）
 
-```vb
-' === PR-1 + PR-2 整 batch 缓存初始化 ===
-If Not VouMetaCache.IsLoaded Then
-    Call VouMetaCache.LoadAll(objDS)
-    blnMetaLoadedHere = True
-End If
-If Not VouSchemaCache.IsLoaded Then
-    Call VouSchemaCache.LoadAll(objDS)
-End If
-```
+⚠️ **跨工程架构下不需要**。`VouSchemaCache` 只在工程 C 使用，由 `megetDocByID` 内部首次调用时自动 EnsureLoaded（懒加载）。
 
-`ErrH:` 末尾：
-
-```vb
-If blnMetaLoadedHere Then
-    Call VouMetaCache.ClearAll
-    Call VouSchemaCache.ClearAll
-End If
-```
+工程 A 的 `meCreateVou` 不需要任何 PR-2 改动。
 
 ---
 
-## Patch 2：`t_FVou_M.cls` `megetDocByID` 优先用缓存
+## Patch 2：`t_FVou_M.cls` `megetDocByID` 优先用缓存（工程 C）
 
 ### 修改前
 
@@ -53,7 +40,7 @@ Private Function megetDocByID(ByVal cid As String, ByVal objDS As HHDataService.
 End Function
 ```
 
-### 修改后
+### 修改后（懒加载版）
 
 ```vb
 Private Function megetDocByID(ByVal cid As String, ByVal objDS As HHDataService.sysDataService, ...) As Boolean
@@ -64,11 +51,11 @@ On Error GoTo ErrHandler
         Call Err.Raise(ERROR_FORSYSTEM, , "无效的凭证ID")
     End If
 
-    ' === PR-2 cache fast path：cid="" 时（创建新凭证）从 schema 缓存克隆 ===
-    If cid = "" And VouSchemaCache.IsLoaded Then
-        Set mMainData = VouSchemaCache.CloneMainEmpty()
-        Set mItemsData = VouSchemaCache.CloneItemsEmpty()
-        Set mIItemsData = VouSchemaCache.CloneIItemsEmpty()
+    ' === PR-2 cache fast path：cid="" 时从 schema 缓存克隆（懒加载）===
+    If cid = "" Then
+        Set mMainData = VouSchemaCache.CloneMainEmptyOrLoad(objDS)
+        Set mItemsData = VouSchemaCache.CloneItemsEmptyOrLoad(objDS)
+        Set mIItemsData = VouSchemaCache.CloneIItemsEmptyOrLoad(objDS)
         If Not mMainData Is Nothing And Not mItemsData Is Nothing And Not mIItemsData Is Nothing Then
             megetDocByID = True
             Exit Function
