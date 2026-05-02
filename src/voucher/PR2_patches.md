@@ -101,16 +101,18 @@ End Function
 
 ---
 
-## Patch 3：`cMthCstAccGL2.meCreVouForXX` 主查询投影列
+## Patch 3：~~主查询投影列~~（**已撤销**）
 
-原代码 `meCreVouForPG` / `meCreVouForJGIC` / `meCreVouForIIO` / `meCreVouForIPS` / `meCreVouForCstFYFT` / `meCreVouForPI` 等都用 `SELECT m.*` 加多 LEFT JOIN。`PG_M / IIO_M` 这种业务大表每行 50+ 字段。10 万行 × 50+ 字段网络传输流量巨大。
+⚠️ **审计发现**：D1 主查询投影列的预期收益只有约 -1.2s（占总耗时 < 0.1%），但**风险高**：
+- `Set objIDC.rsBill = rsBill` 把 rs 传给下游 DAL，DAL 内部可能动态访问 `rsBill.Fields("XXX")`
+- 投影列方案中遗漏任一字段会导致运行时 `项不在该集合中` 错误
+- 我们无法 100% 验证每个 DAL 内部所有字段使用路径
 
-DAL 实际只用以下字段（`IDCService.CreateVou` 内 + 各 DAL 入口）：
+**结论**：保留原代码 `SELECT m.*`，PR-2 只做 A2（schema 缓存），D1 撤销。
 
-- `BillID, BillNo, BillDate, ComID, DepID, EmpID, RBTag, Remark`
-- 部分 DAL 还需：`STID, STName, CorpID, CorpName, FIID, FINo, TInvID, TInvName, BillTag, BState, IPSTag, ICType, IOTag, ssbtag, QTY, Weight`
+如果未来确实需要降低网络流量，应通过**逐字段分析**每个 DAL 类（包括所有 if 分支）后再做投影列改造，并配套完整的 UAT 验证。
 
-详细投影列方案见每个 `meCreVouForXX` 的 Patch 子项。**实施时只需把 `SELECT m.*` 改为 `SELECT m.BillID, m.BillNo, m.BillDate, ...` 等明确列表**；其它代码（rsBill 字段读取）不变。
+<!-- Patch 3 子节已撤销
 
 ### Patch 3-1：`meCreVouForSS`（按单生成）
 
@@ -199,7 +201,7 @@ SQL = SQL & "From CST_FT_M m    " & vbCrLf
 ' ...
 ```
 
-> **注意**：`Set objIDC.rsBill = rsBill` 把整个 rsBill 传给 IDCService，下游 DAL 可能直接读 `Me.rsBill.Fields("XXX").Value`。如果某个 DAL 用了"投影列以外"的字段，需要补回来。这种场景已通过审计原代码确认：所有 DAL 当前用到的字段都已在投影列中。但**部署前应执行一遍完整功能回归**确保没有"动态字段使用"被遗漏。
+> Patch 3 全部撤销 -->
 
 ---
 
@@ -207,7 +209,7 @@ SQL = SQL & "From CST_FT_M m    " & vbCrLf
 
 1. 把 `VouSchemaCache.bas` 加入 VB6 工程（标准模块）
 2. 应用 Patch 2（megetDocByID）→ 编译 → 灰度（此时 schema 缓存还未加载，行为不变）
-3. 应用 Patch 3-1～3-8（主查询投影列）→ 编译 → 灰度（每个 meCreVouForXX 独立验证）
-4. 应用 Patch 1（在 meCreateVou 入口启用 VouSchemaCache.LoadAll）→ schema 缓存生效
+3. 应用 Patch 1（在 meCreateVou 入口启用 VouSchemaCache.LoadAll）→ schema 缓存生效
 
-部署完成后，A2 + D1 共节省约 **5–8 min**（10 万张凭证 / 2 小时基线场景）。
+部署完成后，A2 节省约 **5 min**（10 万张凭证 / 2 小时基线场景）。
+原计划的 D1 投影列已撤销（见 Patch 3 节）。

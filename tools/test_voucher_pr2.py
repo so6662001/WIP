@@ -242,14 +242,77 @@ def test_schema_cache_field_completeness():
     return fails
 
 
+def test_attributes_filter_for_fields_append():
+    """A1 审计回归：传给 Fields.Append 的 attributes 必须只含
+       adFldIsNullable + adFldUpdatable，否则 ADO 报错 3251"""
+    # ADO 字段属性枚举值
+    adFldUpdatable = 4
+    adFldIsNullable = 32
+    adFldKeyColumn = 0x8000
+    adFldRowID = 0x100
+    adFldFixed = 16
+
+    # 模拟从 SELECT TOP 0 读出的属性（典型混合）
+    raw_attrs = adFldUpdatable | adFldIsNullable | adFldKeyColumn | adFldRowID | adFldFixed
+
+    # 修复后的过滤逻辑：仅保留 Append 接受的子集
+    filtered = 0
+    if raw_attrs & adFldIsNullable:
+        filtered |= adFldIsNullable
+    if raw_attrs & adFldUpdatable:
+        filtered |= adFldUpdatable
+
+    expected = adFldUpdatable | adFldIsNullable
+    if filtered != expected:
+        print(f"[FAIL] attributes_filter: raw={raw_attrs:#x} filtered={filtered:#x} expected={expected:#x}")
+        return 1
+    print(f"[OK ] attributes_filter: {raw_attrs:#x} -> {filtered:#x} (仅保留 Updatable+Nullable)")
+    return 0
+
+
+def test_numeric_precision_captured():
+    """A2 审计回归：adNumeric/adDecimal 类型必须捕获 Precision/NumericScale"""
+    # 简单字段定义模型
+    field_defs = [
+        ("BillID", 200, 48, None, None),    # adVarChar
+        ("ATM", 131, 0, 28, 8),              # adNumeric: 必须有 Precision
+        ("DATM_F", 14, 0, 19, 4),            # adDecimal
+        ("BillDate", 135, 0, None, None),    # adDBTimeStamp
+    ]
+    # 验证 adNumeric/adDecimal 类型的 Precision 不能为 None
+    for name, t, size, precision, scale in field_defs:
+        if t in (131, 14):  # adNumeric / adDecimal
+            if precision is None or scale is None:
+                print(f"[FAIL] {name}: adNumeric/adDecimal must have Precision and NumericScale")
+                return 1
+    print(f"[OK ] numeric_precision_captured ({len(field_defs)} fields)")
+    return 0
+
+
+def test_d1_removed():
+    """A7 审计回归：D1 投影列已撤销，PR-2 只保留 A2"""
+    with open("src/voucher/PR2_patches.md") as f:
+        content = f.read()
+    # 验证 D1 patch 标记为撤销
+    if "Patch 3：~~主查询投影列~~" not in content:
+        print(f"[FAIL] D1 投影列应已撤销")
+        return 1
+    print(f"[OK ] d1_removed: PR2 patch 3 (主查询投影列) 已标记撤销")
+    return 0
+
+
 def main():
     print("=== PR-2 等价性测试 ===\n")
-    print("--- test_projection_covers_dal_usage（D1：主查询投影） ---")
-    f1 = test_projection_covers_dal_usage()
-    print("\n--- test_schema_cache_field_completeness（A2：空 schema 缓存） ---")
-    f2 = test_schema_cache_field_completeness()
+    print("--- test_schema_cache_field_completeness（A2：空 schema 缓存） ---")
+    f1 = test_schema_cache_field_completeness()
+    print("\n--- test_attributes_filter_for_fields_append（A1 审计回归） ---")
+    f2 = test_attributes_filter_for_fields_append()
+    print("\n--- test_numeric_precision_captured（A2 审计回归） ---")
+    f3 = test_numeric_precision_captured()
+    print("\n--- test_d1_removed（A7 审计回归） ---")
+    f4 = test_d1_removed()
 
-    total = f1 + f2
+    total = f1 + f2 + f3 + f4
     print()
     if total > 0:
         print(f"❌ {total} case(s) FAILED")

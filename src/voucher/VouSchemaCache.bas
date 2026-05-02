@@ -25,10 +25,12 @@ Option Explicit
 
 ' 字段定义快照
 Private Type FieldDef
-    Name        As String
-    DataType    As Long      ' ADODB.DataTypeEnum
-    DefinedSize As Long
-    Attributes  As Long      ' ADODB.FieldAttributeEnum bitmask
+    Name           As String
+    DataType       As Long      ' ADODB.DataTypeEnum
+    DefinedSize    As Long
+    Attributes     As Long      ' 可设置的子集（adFldIsNullable / adFldUpdatable）
+    NumericScale   As Byte      ' 仅 adNumeric / adDecimal 用
+    Precision      As Byte      ' 仅 adNumeric / adDecimal 用
 End Type
 
 Private m_arrMainFlds()     As FieldDef
@@ -144,6 +146,9 @@ End Function
 
 '==============================================================================
 ' Private：把 ADO Recordset 字段定义抓到数组
+'   ⚠️ Attributes 只保留 Fields.Append 接受的子集（adFldIsNullable + adFldUpdatable）
+'      其它如 adFldKeyColumn / adFldRowID / adFldFixed 等是 read-only 标志，
+'      传给 Append 会触发 ADO 错误 3251
 '==============================================================================
 Private Sub meCaptureFields(ByVal rs As ADODB.Recordset, _
                             ByRef arr() As FieldDef, _
@@ -157,7 +162,27 @@ Private Sub meCaptureFields(ByVal rs As ADODB.Recordset, _
         arr(i).Name = fld.Name
         arr(i).DataType = fld.Type
         arr(i).DefinedSize = fld.DefinedSize
-        arr(i).Attributes = fld.Attributes
+        ' 只保留 Fields.Append 接受的属性
+        Dim attrs As Long
+        attrs = 0
+        If (fld.Attributes And adFldIsNullable) <> 0 Then
+            attrs = attrs Or adFldIsNullable
+        End If
+        If (fld.Attributes And adFldUpdatable) <> 0 Then
+            attrs = attrs Or adFldUpdatable
+        End If
+        arr(i).Attributes = attrs
+
+        ' 数值类型保存 Precision/NumericScale
+        Select Case fld.Type
+            Case adNumeric, adDecimal
+                arr(i).NumericScale = fld.NumericScale
+                arr(i).Precision = fld.Precision
+            Case Else
+                arr(i).NumericScale = 0
+                arr(i).Precision = 0
+        End Select
+
         i = i + 1
     Next fld
 End Sub
@@ -165,6 +190,7 @@ End Sub
 
 '==============================================================================
 ' Private：根据字段定义数组构造一个独立的、可写的空 Recordset
+'   对 adNumeric/adDecimal 类型必须设置 Precision/NumericScale，否则 ADO 报错
 '==============================================================================
 Private Function meBuildEmpty(ByRef arr() As FieldDef, ByVal lngCount As Long) As ADODB.Recordset
     Dim rs As ADODB.Recordset
@@ -178,6 +204,12 @@ Private Function meBuildEmpty(ByRef arr() As FieldDef, ByVal lngCount As Long) A
         Else
             rs.Fields.Append arr(i).Name, arr(i).DataType, , arr(i).Attributes
         End If
+        ' 数值类型：Append 后单独设置 Precision/NumericScale
+        Select Case arr(i).DataType
+            Case adNumeric, adDecimal
+                rs.Fields(arr(i).Name).Precision = arr(i).Precision
+                rs.Fields(arr(i).Name).NumericScale = arr(i).NumericScale
+        End Select
     Next i
     rs.CursorLocation = adUseClient
     rs.Open , , adOpenKeyset, adLockOptimistic
