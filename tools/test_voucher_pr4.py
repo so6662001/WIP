@@ -45,6 +45,9 @@ adTinyInt = 16
 # Python 复刻 meQuoteValue
 # ============================================================
 def me_quote_value(fld):
+    """与修复后的 VB6 meQuoteValue 行为等价：
+       - 日期用 24 小时制 (HH 不是 hh)
+       - 数值用区域无关的字符串 (Str 始终用 . 不受 LCID 影响)"""
     if fld.value is None:
         return "NULL"
     t = fld.type
@@ -52,6 +55,7 @@ def me_quote_value(fld):
         return "N'" + str(fld.value).replace("'", "''") + "'"
     if t in (adDate, adDBTimeStamp):
         if isinstance(fld.value, datetime):
+            # ✅ %H = 24 小时制 (Python strftime 天然区分 H/I)
             return "'" + fld.value.strftime("%Y-%m-%d %H:%M:%S") + "'"
         if isinstance(fld.value, date):
             return "'" + fld.value.strftime("%Y-%m-%d") + " 00:00:00'"
@@ -60,6 +64,8 @@ def me_quote_value(fld):
         return "1" if bool(fld.value) else "0"
     if t in (adNumeric, adDecimal, adCurrency, adDouble, adSingle,
              adInteger, adSmallInt, adBigInt, adTinyInt):
+        # ✅ 区域无关：直接用 repr 等价于 VB6 Str()，始终用 .
+        # Python str(1.5) 始终输出 "1.5"，不受 locale 影响
         return str(fld.value)
     return "N'" + str(fld.value).replace("'", "''") + "'"
 
@@ -264,6 +270,46 @@ def test_ssbtag_sign_logic():
     return fails
 
 
+def test_24h_format_pm():
+    """C1 审计回归：下午时间必须用 24 小时制（VB6 hh=12 小时已修为 HH=24 小时）"""
+    cases = [
+        (datetime(2024, 6, 1,  9,  0,  0), "'2024-06-01 09:00:00'"),
+        (datetime(2024, 6, 1, 13,  0,  0), "'2024-06-01 13:00:00'"),  # 关键：下午 13:00
+        (datetime(2024, 6, 1, 23, 59, 59), "'2024-06-01 23:59:59'"),
+        (datetime(2024, 6, 1,  0,  0,  0), "'2024-06-01 00:00:00'"),
+    ]
+    fails = 0
+    for dt, expected in cases:
+        actual = me_quote_value(Field("t", dt, adDBTimeStamp))
+        if actual != expected:
+            print(f"[FAIL] 24h_format {dt}: expected {expected!r}, got {actual!r}")
+            fails += 1
+        else:
+            print(f"[OK ] 24h_format {dt} -> {actual}")
+    return fails
+
+
+def test_decimal_locale_independence():
+    """C3 审计回归：小数点必须始终用 '.'，不受区域影响"""
+    # Python str(float) 总是用 '.'，等价于修复后的 VB6 Str()
+    cases = [
+        (1.5,    "1.5"),
+        (-99.99, "-99.99"),
+        (0.0,    "0.0"),
+        (1234.5678, "1234.5678"),
+        (1000000.5, "1000000.5"),
+    ]
+    fails = 0
+    for v, expected in cases:
+        actual = me_quote_value(Field("d", v, adDouble))
+        if actual != expected:
+            print(f"[FAIL] decimal {v}: expected {expected!r}, got {actual!r}")
+            fails += 1
+    if fails == 0:
+        print(f"[OK ] decimal_locale_independence ({len(cases)} cases)")
+    return fails
+
+
 def main():
     print("=== PR-4 等价性测试 ===\n")
     print("--- test_quote_value_types ---")
@@ -276,8 +322,12 @@ def main():
     f4 = test_c1_dal_aggregation_equivalence()
     print("\n--- test_ssbtag_sign_logic ---")
     f5 = test_ssbtag_sign_logic()
+    print("\n--- test_24h_format_pm (审计回归 C1：hh -> HH) ---")
+    f6 = test_24h_format_pm()
+    print("\n--- test_decimal_locale_independence (审计回归 C3) ---")
+    f7 = test_decimal_locale_independence()
 
-    total = f1 + f2 + f3 + f4 + f5
+    total = f1 + f2 + f3 + f4 + f5 + f6 + f7
     print()
     if total > 0:
         print(f"❌ {total} case(s) FAILED")
