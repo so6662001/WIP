@@ -49,6 +49,24 @@ End Property
 
 
 '==============================================================================
+' Public：懒加载入口（跨工程友好）
+'
+' VB6 标准模块的状态在每个 ActiveX DLL 工程内独立。当 t_FVou_M / CVouService
+' （工程 C）调用 TryGetFI 时，工程 C 内的 m_blnLoaded 与工程 A 的 m_blnLoaded
+' 是不同的两份变量。原 PR-1 假设"meCreateVou 一次 LoadAll，所有调用方共享"
+' 在跨工程下不成立。
+'
+' 修复：每个 TryGet* 函数首次调用时自动 EnsureLoaded —— 每个工程独立加载一次
+' 元数据，数据完全相同（只读元数据），3 个工程一共最多 21 次 SQL（一次性，
+' 不在主循环里）。
+'==============================================================================
+Public Sub EnsureLoaded(ByVal objDS As HHDataService.sysDataService)
+    If m_blnLoaded Then Exit Sub
+    Call LoadAll(objDS)
+End Sub
+
+
+'==============================================================================
 ' Public：在 batch 入口一次性加载所有元数据
 '==============================================================================
 Public Sub LoadAll(ByVal objDS As HHDataService.sysDataService)

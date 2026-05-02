@@ -1,5 +1,24 @@
 # 凭证生成性能优化 PR-1：元数据缓存 + 消除反射
 
+## ⚠️ 跨工程架构（最重要）
+
+凭证生成涉及三个 VB6 ActiveX DLL：
+
+```
+POPBus3FileService.dll  (工程 A)  — meCreateVou, cMthCstAccGL2.meCreVouForXX
+POPBus3GL2IDC.dll       (工程 B)  — IDCService, SSBillByDateDAL 等 DAL
+POPBus3GL2Service.dll   (工程 C)  — t_FVou_M, CVouService.SaveDoc
+```
+
+**.bas 模块状态在不同工程间不共享**。本 PR 的所有 `.bas` 文件需要按下表加到对应工程：
+
+| .bas 文件 | 加到哪些工程 | 原因 |
+|---|---|---|
+| `VouMetaCache.bas` | **A + B + C 三个工程** | BeforeAction (C) / GetFIIDByPrdt (C) / meCreVouForXX (A) 都会用到；元数据是只读的，每工程独立缓存数据相同 |
+| `VouCacheHelpers.bas` | **C 工程** | CheckFI/CheckCorp/CheckEmp/CheckAcc 被 BeforeAction (C) 调用；LookupDocFI_* 被 t_FVou_M (C) 调用 |
+
+**懒加载机制**：每个工程首次调 `TryGetXxx` 时自动 `EnsureLoaded(objDS)`。元数据是只读的，3 个工程各加载一次（共 21 次 SQL）依然 < 50ms。
+
 ## 范围
 
 **第一波** A1/A3/A4/A5/A6（A2 移至 PR-2 同步处理写入路径）：

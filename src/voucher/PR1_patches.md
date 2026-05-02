@@ -2,13 +2,42 @@
 
 本 PR 把 6 处 N+1 查询替换为 `VouMetaCache.bas` 的内存查找，并把 `meAddRowI` 反射赋值展开为显式属性赋值。**所有修改保持调用接口和返回值 100% 等价**。
 
+## ⚠️ 跨工程架构（2026-05-02 第三轮审计）
+
+凭证生成涉及三个 VB6 ActiveX DLL：
+
+```
+POPBus3FileService.dll  (工程 A)  ← cMthCstAccGL2.meCreVouForXX
+POPBus3GL2IDC.dll       (工程 B)  ← IDCService, SSBillByDateDAL 等 DAL
+POPBus3GL2Service.dll   (工程 C)  ← t_FVou_M, CVouService
+```
+
+**.bas 模块状态在不同工程间不共享**。`VouMetaCache.bas` 必须**加到所有 3 个工程**（同一份 .bas 文件被三工程各自引用）。每个工程**独立懒加载**——首次 TryGet 时自动 LoadAll，元数据是只读的，三份缓存数据完全相同。
+
+PR-1 已将 `EnsureLoaded` 改为懒加载入口；调用方（无论哪个工程）只需调 `VouMetaCache.TryGetXxx`，缓存自动初始化。
+
 应用顺序：
-1. 把 `VouMetaCache.bas` 直接添加到 VB6 工程（标准模块）
-2. 按下面的 6 处 patch 修改对应的现有 `.cls` 文件
+1. 把 `VouMetaCache.bas` 添加到**三个工程**（A + B + C）—— 同一份 .bas 文件
+2. 把 `VouCacheHelpers.bas` 添加到 **工程 C（POPBus3GL2Service）**——CheckFI 等被 C 工程的 BeforeAction 调用
+3. 按下面的 6 处 patch 修改对应的现有 `.cls` 文件
+4. **不再需要在 `meCreateVou` 入口显式 LoadAll**——懒加载自动处理
 
 ---
 
-## Patch 1：`cMthCstAccGL2.cls` — 在 `meCreateVou` 入口加载 / 末尾清理
+## Patch 1：~~`cMthCstAccGL2.cls` — 在 `meCreateVou` 入口加载 / 末尾清理~~（懒加载替代）
+
+⚠️ **已简化**：跨工程懒加载下不再需要在 `meCreateVou` 入口显式 LoadAll。各 helper 内部首次调用时自动 EnsureLoaded。
+
+如果您希望"主动预热"（避免首张凭证延迟略高），可以在 `meCreateVou` 入口加：
+
+```vb
+' Optional: 主动预热缓存
+Call VouMetaCache.EnsureLoaded(objDS)
+```
+
+但这只预热工程 A 自己的 cache；工程 B/C 仍需各自首次调用时懒加载。性能影响可忽略（B/C 各加一次 7-SQL LoadAll，总计 < 50ms）。
+
+### 原 Patch 1（参考）
 
 ### 修改前
 
@@ -381,38 +410,43 @@ Private Sub BeforeAction(...)
 End Sub
 ```
 
-### 修改后
+### 修改后（懒加载版）
 
-新增私有辅助过程 `meBeforeAction_FillRow`，并在 `BeforeAction` 入口判断缓存：
+helper 内部自动 EnsureLoaded，BeforeAction 不再判断缓存状态：
 
 ```vb
 Private Sub BeforeAction(...)
     ...
-    Dim blnUseCache As Boolean
-    blnUseCache = VouMetaCache.IsLoaded            ' === PR-1 新增 ===
-    
-    If Not blnUseCache Then
-        ' 原 4 段 SQL 查询保持不变
-        If strFIIDList <> "" Then
-            ...
-            Set rsfcode = objDS.OpenRecordsetBySQL(...)
-        End If
-        ' Corp / Emp / Acc 同样保留
+    ' 仍然保留原 IN-list SQL 查询作为 fallback 路径——helper 内若 EnsureLoaded
+    ' 失败（DB 异常）会回退到 db 路径。但生产中 EnsureLoaded 通常会成功，
+    ' rsfcode/rsCorps/rsEmps/rsAccs 通常不会被实际查询。
+    '
+    ' 选项 A（推荐）：完全去掉 4 段 IN-list SQL，让 helper 自己懒加载
+    '                 helper 在 cache 命中时不读 rsfcode；未命中时（缓存
+    '                 失败）走原 db 路径但 rsfcode 已是 Nothing，会触发
+    '                 NullReference。**所以 4 段 SQL 必须保留作为 fallback**
+
+    If strFIIDList <> "" Then
+        strFIIDList = Left(strFIIDList, Len(strFIIDList) - 1)
+        SQL = "SELECT FIID,FIName,FINO,ISStop,FITag,ExpTag,HSTag,HSTagName,baNum,baCust,baSupp,baOtherCorp,fullname FROM FinanceItems WHERE FIID in (" & strFIIDList & ")"
+        Set rsfcode = objDS.OpenRecordsetBySQL(SQL, True, True)
     End If
-    
+    ' ... Corp / Emp / Acc 同样保留 ...
+
     Call objDS.rs_MoveFirst(ItemsData)
     Do While Not ItemsData.EOF
-        ' ... 字段访问统一改为通过 helper：
-        Call meCheckFIID(objDS, blnUseCache, rsfcode, rsFIBak, ItemsData, ActCHName, strBillInfo, strErrInfo)
-        Call meCheckAccID(objDS, blnUseCache, rsAccs, ItemsData, ActCHName, strBillInfo, strErrInfo)
-        Call meCheckCorp(objDS, blnUseCache, rsCorps, ItemsData, ActCHName, strBillInfo, strErrInfo)
-        Call meCheckEmp(objDS, blnUseCache, rsEmps, ItemsData, ActCHName, strBillInfo, strErrInfo)
+        ' helper 内部会先 EnsureLoaded VouMetaCache，命中则用缓存，否则用 rsfcode 等
+        Call VouCacheHelpers.CheckFI  (objDS, ItemsData, rsfcode, rsFIBak, ActCHName, strBillInfo, strErrInfo)
+        Call VouCacheHelpers.CheckAcc (objDS, ItemsData, rsAccs, ActCHName, strBillInfo, strErrInfo)
+        Call VouCacheHelpers.CheckCorp(objDS, ItemsData, rsCorps, ActCHName, strBillInfo, strErrInfo)
+        Call VouCacheHelpers.CheckEmp (objDS, ItemsData, rsEmps, ActCHName, strBillInfo, strErrInfo)
         ItemsData.MoveNext
     Loop
 End Sub
 ```
 
-> 完整 helper 实现见 `CVouService_PR1_helpers.bas`。helper 的两条路径（cache 与非 cache）必须返回完全相同的 ItemsData 字段写入和 strErrInfo 内容。
+> Helper 签名已去掉 `blnUseCache` 参数（PR-1 第三轮审计修改）；内部自动 EnsureLoaded。
+> 缓存命中时不会读 rsfcode；缓存未加载时（如 LoadAll 抛错）走 rsfcode 路径——所以 BeforeAction 仍需保留原 IN-list SELECT 作为 fallback。
 
 ---
 

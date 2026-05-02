@@ -36,15 +36,20 @@ Option Explicit
 '   5. Select Case ItemsData.Fields("HSTag").Value (由调用方负责)
 '
 ' 本 helper 只做 1, 2, 4。调用方负责 3 和 5。
+'
+' 跨工程懒加载：本 helper 内部自动 EnsureLoaded VouMetaCache，调用方不用
+' 关心 IsLoaded。如 LoadAll 失败（DB 异常）会向上抛错。
 '==============================================================================
 Public Sub CheckFI(ByVal objDS As HHDataService.sysDataService, _
                    ByVal ItemsData As ADODB.Recordset, _
-                   ByVal blnUseCache As Boolean, _
                    ByRef rsfcode As ADODB.Recordset, _
                    ByRef rsFIBak As ADODB.Recordset, _
                    ByVal ActCHName As String, _
                    ByVal strBillInfo As String, _
                    ByRef strErrInfo As String)
+    Call VouMetaCache.EnsureLoaded(objDS)
+    Dim blnUseCache As Boolean
+    blnUseCache = VouMetaCache.IsLoaded
     Dim sFIID As String
     sFIID = objDS.NullToStr(ItemsData.Fields("FIID").Value)
 
@@ -177,7 +182,6 @@ End Sub
 '==============================================================================
 Public Sub CheckAcc(ByVal objDS As HHDataService.sysDataService, _
                     ByVal ItemsData As ADODB.Recordset, _
-                    ByVal blnUseCache As Boolean, _
                     ByRef rsAccs As ADODB.Recordset, _
                     ByVal ActCHName As String, _
                     ByVal strBillInfo As String, _
@@ -185,6 +189,10 @@ Public Sub CheckAcc(ByVal objDS As HHDataService.sysDataService, _
     Dim sAccID As String
     sAccID = objDS.NullToStr(ItemsData.Fields("AccID").Value)
     If sAccID = "" Then Exit Sub
+
+    Call VouMetaCache.EnsureLoaded(objDS)
+    Dim blnUseCache As Boolean
+    blnUseCache = VouMetaCache.IsLoaded
 
     Dim blnFound As Boolean
     Dim blnIsStop As Boolean
@@ -252,7 +260,6 @@ End Sub
 '==============================================================================
 Public Sub CheckCorp(ByVal objDS As HHDataService.sysDataService, _
                      ByVal ItemsData As ADODB.Recordset, _
-                     ByVal blnUseCache As Boolean, _
                      ByRef rsCorps As ADODB.Recordset, _
                      ByVal ActCHName As String, _
                      ByVal strBillInfo As String, _
@@ -260,6 +267,10 @@ Public Sub CheckCorp(ByVal objDS As HHDataService.sysDataService, _
     Dim sCorpID As String
     sCorpID = objDS.NullToStr(ItemsData.Fields("CorpID").Value)
     If sCorpID = "" Then Exit Sub
+
+    Call VouMetaCache.EnsureLoaded(objDS)
+    Dim blnUseCache As Boolean
+    blnUseCache = VouMetaCache.IsLoaded
 
     Dim sCTagName As String
     Select Case CLng(objDS.NullToDbl(ItemsData.Fields("corptag").Value))
@@ -309,7 +320,6 @@ End Sub
 '==============================================================================
 Public Sub CheckEmp(ByVal objDS As HHDataService.sysDataService, _
                     ByVal ItemsData As ADODB.Recordset, _
-                    ByVal blnUseCache As Boolean, _
                     ByRef rsEmps As ADODB.Recordset, _
                     ByVal ActCHName As String, _
                     ByVal strBillInfo As String, _
@@ -317,7 +327,11 @@ Public Sub CheckEmp(ByVal objDS As HHDataService.sysDataService, _
     Dim sEmpID As String
     sEmpID = objDS.NullToStr(ItemsData.Fields("empid").Value)
     If sEmpID = "" Then Exit Sub
-    
+
+    Call VouMetaCache.EnsureLoaded(objDS)
+    Dim blnUseCache As Boolean
+    blnUseCache = VouMetaCache.IsLoaded
+
     Dim blnFound As Boolean, blnDismission As Boolean, sEmpName As String
     
     If blnUseCache Then
@@ -400,6 +414,7 @@ Public Function LookupDocFI_5Step(ByVal objDS As HHDataService.sysDataService, _
                                   ByVal isStrict As Boolean, _
                                   ByRef rtnFIID As String, _
                                   ByRef rtnFINO As String, ByRef rtnFIName As String) As Boolean
+    Call VouMetaCache.EnsureLoaded(objDS)
     If Not VouMetaCache.IsLoaded Then Exit Function
 
     Dim sFIID As String, sFINO As String, sFIName As String
@@ -523,6 +538,7 @@ Public Function LookupDocFI_KeyOnly(ByVal objDS As HHDataService.sysDataService,
                                     ByRef rtnFIID As String, _
                                     ByRef rtnFINO As String, _
                                     ByRef rtnFIName As String) As Boolean
+    Call VouMetaCache.EnsureLoaded(objDS)
     If Not VouMetaCache.IsLoaded Then Exit Function
 
     Dim sFIID As String, sFINO As String, sFIName As String
