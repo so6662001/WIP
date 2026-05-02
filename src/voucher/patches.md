@@ -1,5 +1,24 @@
 # PR-1 应用 patches
 
+## 跨工程架构
+
+凭证生成涉及 3 个 VB6 ActiveX DLL 工程：
+
+```
+POPBus3FileService.dll  (工程 A)  meCreateVou + meCreVouForXX
+POPBus3GL2IDC.dll       (工程 B)  IDCService + 各 DAL
+POPBus3GL2Service.dll   (工程 C)  t_FVou_M + CVouService
+```
+
+PR-1 改动**全部集中在工程 C**（除了 .bas 文件需要加到三个工程外）。
+
+## 文件部署
+
+| .bas 文件 | 加到工程 |
+|---|---|
+| `VouMetaCache.bas` | A + B + C 三个工程 |
+| `VouCacheHelpers.bas` | C |
+
 按顺序应用以下修改。每条都标注**所属工程**。
 
 ---

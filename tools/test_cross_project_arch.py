@@ -102,8 +102,8 @@ def test_helpers_call_ensureloaded():
 
 
 def test_pr1_patches_doc_cross_project():
-    """PR1_patches.md 必须明确说明 .bas 加到三个工程"""
-    src = read("PR1_patches.md")
+    """patches.md 必须明确说明 .bas 加到三个工程"""
+    src = read("patches.md")
     if skip_if_missing("test_pr1_patches_doc_cross_project", src): return 0
     required = [
         "POPBus3FileService.dll",
@@ -113,15 +113,15 @@ def test_pr1_patches_doc_cross_project():
     ]
     missing = [r for r in required if r not in src]
     if missing:
-        print(f"[FAIL] PR1_patches.md 缺架构说明: {missing}")
+        print(f"[FAIL] patches.md 缺架构说明: {missing}")
         return 1
-    print("[OK ] PR1_patches.md 明确说明三工程架构")
+    print("[OK ] patches.md 明确说明三工程架构")
     return 0
 
 
 def test_pr3_uses_batchmode_property():
     """PR3 patches 必须用 Me.BatchMode（属性传递），不再用 VouBatchOps.InBatchMode"""
-    src = read("PR3_patches.md")
+    src = read("patches_pr3.md")
     if skip_if_missing("test_pr3_uses_batchmode_property", src): return 0
     # SaveDoc 内的判断必须用 Me.BatchMode
     if "Not Me.BatchMode" not in src:
@@ -137,7 +137,7 @@ def test_pr3_uses_batchmode_property():
 
 def test_pr4_uses_me_batchmode():
     """PR4 patches 必须用 Me.BatchMode 触发 INSERT VALUES（不是 VouBatchOps.InBatchMode）"""
-    src = read("PR4_patches.md")
+    src = read("patches_pr4.md")
     if skip_if_missing("test_pr4_uses_me_batchmode", src): return 0
     if "Me.BatchMode" not in src:
         print("[FAIL] PR4 patches 没有用 Me.BatchMode 触发 INSERT VALUES")
@@ -159,7 +159,7 @@ def test_batchops_only_in_project_a():
 
 def test_recordsavedbill_in_loop():
     """meCreVouForXX 循环里必须调 RecordSavedBill(rtnVouBillID)"""
-    src = read("PR3_patches.md")
+    src = read("patches_pr3.md")
     if skip_if_missing("test_recordsavedbill_in_loop", src): return 0
     if "RecordSavedBill(objIDC.rtnVouBillID" not in src:
         print("[FAIL] PR3 patches 缺 RecordSavedBill(objIDC.rtnVouBillID, ...) 调用")
