@@ -1,4 +1,4 @@
-# 凭证生成性能优化 PR-1：元数据缓存 + 消除反射赋值
+# 凭证生成性能优化 PR-1 + PR-2：元数据缓存 + schema 缓存 + 消除反射赋值
 
 ## 跨工程架构（必读）
 
@@ -56,6 +56,7 @@ End Sub
 |---|---|---|
 | `VouMetaCache.bas` | **A + B + C** | 元数据缓存（每工程独立，懒加载）|
 | `VouCacheHelpers.bas` | **C** | BeforeAction / GetFIIDBy* 系列等价回退 helper |
+| `VouSchemaCache.bas` | **C** (PR-2) | FVou_M/FVou_I/FVou_II 空 schema 缓存 |
 
 ## VB6 类修改（patches）
 
@@ -82,6 +83,7 @@ End Sub
 |---|---|---|
 | Baseline（用户报告基线）| ~120 min | — |
 | **After PR-1** | **~75 min** | **-45 min（-38%）**|
+| **After PR-2** | **~60 min** | **-15 min（-20%）**|
 
 ## 100% 等价性约束
 
