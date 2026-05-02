@@ -6,11 +6,22 @@
 - **B2**：`ss_YWVouUpdateAchTimes` per-bill → 整 batch 末尾批量调用
 - **B3**：`ss_AfterSaveUpdateGL2VouBill` per-bill → 整 batch 末尾批量调用
 
+## ⚠️ 跨工程架构（关键）
+
+| 文件 / 修改 | 工程 |
+|---|---|
+| `VouBatchOps.bas` | **只加到工程 A**（POPBus3FileService）；工程 A 的 meCreVouForXX 在循环里收集 BillID |
+| `PR3_storedprocs.sql` | SQL Server 部署 |
+| t_FVou_M 类**新增 BatchMode 属性**（工程 C）| `t_FVou_M.cls` (POPBus3GL2Service) — 跨工程标志位 |
+| IDCService 类**新增 BatchMode 属性**（工程 B）| `IDCService.cls` (POPBus3GL2IDC) — 工程 A 通过此属性把 batch 标志传给 t_FVou_M |
+| `cMthCstAccGL2.meCreVouForXX` 修改（工程 A）| 设置 `objIDC.BatchMode = True`，循环里调 `RecordSavedBill(objIDC.rtnVouBillID)` |
+| `CVouService.SaveDoc` 修改（工程 C）| 通过 `Me.BatchMode`（属于本对象）判断是否跳过 per-bill stored proc |
+
 ## 前置依赖
 
 - PR-1 + PR-2 已合入
 - **必须先在 SQL Server 部署 `PR3_storedprocs.sql`**（创建 2 个批量版 stored proc）
-- 新增 `VouBatchOps.bas`
+- 新增 `VouBatchOps.bas`（工程 A）
 
 ## Patch 1：`cMthCstAccGL2.cls` `meCreateVou` 加 batch 包装 + 大事务
 
@@ -32,13 +43,7 @@ On Error GoTo ErrH
     objGL2.isPreGenIDOnly = isPreGenIDOnly
     objGL2.isSaveToTransitionalTable = isSaveToTransitionalTable
 
-    ' === PR-1 ===
-    If Not VouMetaCache.IsLoaded Then
-        Call VouMetaCache.LoadAll(objDS)
-        blnMetaLoadedHere = True
-    End If
-    ' === PR-2 ===
-    If Not VouSchemaCache.IsLoaded Then Call VouSchemaCache.LoadAll(objDS)
+    ' === PR-1/2 元数据缓存：懒加载，无需在此处显式 LoadAll ===
 
     ' === PR-3 batch + 大事务包装 ===
     ' 防御性：仅当外层无事务时启动；若已在事务中，依赖外层事务即可
@@ -81,24 +86,94 @@ ErrH:
     End If
     Call VouBatchOps.EndBatch
 
-    If blnMetaLoadedHere Then
-        Call VouMetaCache.ClearAll
-        Call VouSchemaCache.ClearAll
-    End If
-
     If Err.Number <> 0 Then
         Call Err.Raise(Err.Number, , Err.Description)
     End If
 End Sub
 ```
 
-> **注意**：原代码 `CVouService.SaveDoc` 内部也有 `BeginTrans/CommitTrans`。在 PR-3 batch 模式下，外层已经包了大事务，**SaveDoc 内部应跳过自己的事务**。详见 Patch 3。
+> **注意 1**：每个 `meCreVouForXX` 内部需要在 CreateVou 后调 RecordSavedBill — 见 Patch 1.5。
+>
+> **注意 2**：原代码 `CVouService.SaveDoc` 内部也有 `BeginTrans/CommitTrans`。在 PR-3 batch 模式下，外层已经包了大事务，**SaveDoc 内部应跳过自己的事务**。详见 Patch 3。
 
 ---
 
-## Patch 2：`CVouService.SaveDoc` SaveDoc 末尾改为 RecordSavedBill
+## Patch 1.5：`cMthCstAccGL2.meCreVouForXX` 循环内 RecordSavedBill（工程 A，跨工程关键）
 
-### 修改前
+每个 `meCreVouForXX` 都有这种循环：
+
+```vb
+Do While Not rsBill.EOF
+    objIDC.BillType = "..."
+    objIDC.BillID = rsBill.Fields("billid").Value
+    ' ... 设置一堆属性 ...
+    Call objIDC.CreateVou(objDS, False)
+
+    ' === PR-3 新增 ===
+    Call objIDC.SetBatchMode(True)         ' 仅首次需要，可在循环外做
+    Call VouBatchOps.RecordSavedBill(objIDC.rtnVouBillID, isSaveToTransitionalTable)
+
+    rsBill.MoveNext
+Loop
+```
+
+实现要点：
+- `objIDC.SetBatchMode(True)` 是 IDCService 新增方法，**跨工程把 batch 标志传到 t_FVou_M**（见 Patch 2）
+- `objIDC.rtnVouBillID` 是已存在的字段，CreateVou 完成后保存当前凭证 BillID
+- `RecordSavedBill` 在工程 A 的 VouBatchOps collection 内收集 BillID
+- 必须在每个 `meCreVouForXX` 都加这两行
+
+---
+
+## Patch 2：跨工程 BatchMode 类属性传递
+
+### Patch 2a：`IDCService.cls` 新增属性 + 转发（工程 B）
+
+```vb
+' === PR-3 跨工程标志 ===
+Public BatchMode As Boolean
+
+Public Sub SetBatchMode(ByVal v As Boolean)
+    BatchMode = v
+End Sub
+```
+
+在 `IDCService.CreateVou` 内创建 `t_FVou_M` 后，把 BatchMode 转发：
+
+```vb
+Set objVouD = New t_FVou_M
+With objVouD
+    Set .AppParameters = Me.AppParameters
+    .AccRate = Me.AccRate
+    ' ... 原代码 ...
+    .BatchMode = Me.BatchMode      ' === PR-3 新增：跨工程标志转发 ===
+End With
+```
+
+### Patch 2b：`t_FVou_M.cls` 新增 BatchMode 属性（工程 C）
+
+```vb
+' === PR-3 跨工程标志 ===
+Public BatchMode As Boolean
+```
+
+### Patch 2c：`CVouService.SaveDoc` 末尾改为根据 t_FVou_M.BatchMode 跳过 stored proc
+
+⚠️ 注意：原 SaveDoc 是 `t_FVou_M.CreateVou` 内部调用 `CVouService.SaveDoc(...)`。`CVouService` 没有直接拿到 `t_FVou_M.BatchMode`，需要用 ByVal 参数透传，或通过 `CVouService` 类自身加 BatchMode 属性。**最简单**：在 `t_FVou_M.CreateVou` 调 SaveDoc 之前把 BatchMode 设置到 objVou：
+
+```vb
+Set objVou.AppParameters = Me.AppParameters
+objVou.UserName = Me.UserName
+objVou.NotWriteEvent = Me.NotWriteEvent
+objVou.isSaveToTransitionalTable = Me.isSaveToTransitionalTable
+objVou.BatchMode = Me.BatchMode    ' === PR-3 新增 ===
+```
+
+`CVouService.cls` 同样新增 `Public BatchMode As Boolean`。
+
+`SaveDoc` 内部修改：
+
+#### 修改前
 
 ```vb
 '4、调用存储过程，实现主表与明细表数据的一致性
@@ -110,15 +185,12 @@ Else
 End If
 ```
 
-### 修改后
+#### 修改后
 
 ```vb
-'4、调用存储过程；batch 模式下延后到末尾批量执行
-If VouBatchOps.InBatchMode Then
-    ' === PR-3 ===
-    Call VouBatchOps.RecordSavedBill(strBillID, Me.isSaveToTransitionalTable)
-Else
-    ' === 原路径（外层未启用 batch 模式时回退）===
+'4、调用存储过程；batch 模式下跳过，由外层（工程 A）整 batch 末尾批量执行
+If Not Me.BatchMode Then
+    ' 原路径（非 batch 模式）
     If isSaveToTransitionalTable = False Then
         Call sysDS.ExecSQL("exec ss_YWVouUpdateAchTimes '" & strBillID & "',1")
         Call sysDS.ExecSQL("exec ss_AfterSaveUpdateGL2VouBill '" & strBillID & "',0")
@@ -126,6 +198,9 @@ Else
         Call sysDS.ExecSQL("exec ss_AfterSaveUpdateGL2VouBill '" & strBillID & "',1")
     End If
 End If
+' batch 模式下：什么都不做，rtnVouBillID 已设置，由 t_FVou_M.CreateVou 返回
+' 给 IDCService.CreateVou，再返回给工程 A 的 meCreVouForXX 循环；
+' 循环里调 VouBatchOps.RecordSavedBill(rtnVouBillID, ...) 收集
 ```
 
 ---
@@ -146,7 +221,7 @@ End If
 ```vb
 '2、实现凭证号的建立
 '   PR-3：batch 模式下外层已包大事务，跳过 per-bill BeginTrans
-If DBConnection Is Nothing And Not VouBatchOps.InBatchMode Then
+If DBConnection Is Nothing And Not Me.BatchMode Then
     Call sysDS.BeginTrans
 End If
 ```
@@ -155,7 +230,7 @@ End If
 
 ```vb
 '提交事务
-If DBConnection Is Nothing And Not VouBatchOps.InBatchMode Then
+If DBConnection Is Nothing And Not Me.BatchMode Then
     Call sysDS.CommitTrans
 End If
 ```
@@ -167,7 +242,7 @@ ErrHandler:
     If Not sysDS Is Nothing Then
         If Err.Number <> 0 Then
             ' batch 模式下不在 SaveDoc 内回滚，由外层 meCreateVou 统一回滚
-            If Not VouBatchOps.InBatchMode Then
+            If Not Me.BatchMode Then
                 sysDS.RollbackTrans
             End If
         End If

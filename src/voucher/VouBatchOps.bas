@@ -8,7 +8,27 @@ Attribute VB_Name = "VouBatchOps"
 '     - ss_AfterSaveUpdateGL2VouBill  (per-bill 后处理)
 '   改为整 batch 末尾**一次性**调用批量版本（按 BillID list 处理）。
 '
-'   同时支持事务批处理：每 N 张凭证 commit 一次，避免 10 万次 commit。
+' 跨工程架构说明
+' ===============
+'   ⚠️ VB6 .bas 模块状态在不同 ActiveX DLL 工程间不共享。
+'   本模块**只能加到工程 A (POPBus3FileService)**，并由工程 A 的
+'   meCreVouForXX 在循环里调 RecordSavedBill(objIDC.rtnVouBillID, ...)
+'   收集 BillID。工程 C (POPBus3GL2Service) SaveDoc 内部不直接调本模块；
+'   而是通过 IDCService.IsBatchMode 属性传递的标志判断是否跳过
+'   per-bill stored proc 调用。
+'
+'   架构图：
+'     A.meCreateVou
+'       BeginBatch + BeginTrans
+'       Set objIDC.IsBatchMode = True             ← 跨工程传递
+'       Loop meCreVouForXX:
+'         objIDC.CreateVou()                      ← 进入工程 B/C
+'           SaveDoc()                              ← 工程 C
+'             根据 t_FVou_M.IsBatchMode 跳过 stored proc
+'         RecordSavedBill(objIDC.rtnVouBillID)    ← 工程 A 内收集
+'       FlushStoredProcs                          ← 工程 A 一次性批量
+'       CommitTrans
+'       EndBatch
 '
 ' 设计原则    : 100% 等价
 '   - 整 batch 处理完所有凭证后，按相同的 BillID 集合调用批量 stored proc，
