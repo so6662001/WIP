@@ -13,60 +13,30 @@ Attribute VB_Name = "VouMetaCache"
 ' 生命周期    : 在 cMthCstAccGL2.meCreVouFor* 进入前调用 LoadAll 一次
 '               整 batch 结束后调用 ClearAll
 '
+' 健壮性      : v2 修订—— 不再用 "|" 分隔字符串拼接（FIName/CorpName 可能含
+'               "|" 字符会被错切分）。所有缓存采用嵌套 Dictionary 结构，
+'               每个字段独立 key，避免任何编码/转义问题。
+'
 ' Database    : 兼容 Microsoft SQL Server 2008 及以上
 '==============================================================================
 Option Explicit
 
-'------------------------------------------------------------------------------
-' FinanceItems：FIID -> "FINO|FIName|ISStop|FITag|EXPTAG|HSTag|HSTagName|baNum|baCust|baSupp|baOtherCorp|FullName"
-'   ISStop / baNum / baCust / baSupp / baOtherCorp 用 "0"/"1" 表示 Boolean
-'   FITag / EXPTAG / HSTag 转为 Long 字符串
-'------------------------------------------------------------------------------
-Private m_dctFI         As Object
+' 各表缓存：DocID -> Scripting.Dictionary（含该行所有字段）
+Private m_dctFI         As Object       ' FIID -> sub-dict
+Private m_dctCorp       As Object       ' CorpID -> sub-dict
+Private m_dctEmp        As Object       ' EmpID -> sub-dict
+Private m_dctAcc        As Object       ' AccID -> sub-dict
+Private m_dctAP         As Object       ' APID -> sub-dict
+Private m_dctDocFI      As Object       ' "DocKey|WHID|DocID" -> sub-dict
+                                         ' (DocKey/WHID/DocID 中不会出现 "|" — 都是 ID 字段)
+Private m_dctVCBills    As Object       ' "BillType|BillSubType" -> vcid (单值，BillSubType 是枚举)
 
-'------------------------------------------------------------------------------
-' Corp：CorpID -> "Contact|CorpName"
-'------------------------------------------------------------------------------
-Private m_dctCorp       As Object
-
-'------------------------------------------------------------------------------
-' Emp：EmpID -> "dismission|EmpName"
-'------------------------------------------------------------------------------
-Private m_dctEmp        As Object
-
-'------------------------------------------------------------------------------
-' Account：AccID -> "ISStop|AccName"
-'------------------------------------------------------------------------------
-Private m_dctAcc        As Object
-
-'------------------------------------------------------------------------------
-' AccPeriod 全表：APID -> "BeginDate(yyyy-MM-dd)|EndDate(yyyy-MM-dd)|APTag|FOAPTag"
-'------------------------------------------------------------------------------
-Private m_dctAP         As Object
-'   按 BeginDate 升序排好的 APID 数组（用于线性查找日期落在哪个期间）
-'   AccPeriod 通常 < 50 行，线性扫描足够
+' AccPeriod 顺序数组（按 BeginDate 升序排好），用于按日期定位
 Private m_arrAPID()     As String
 Private m_lngAPCount    As Long
-'   active period（APTag=2 或 FOAPTag=2 的 APID）
 Private m_strActiveAPID_APTag   As String
 Private m_strActiveAPID_FOAPTag As String
 
-'------------------------------------------------------------------------------
-' GL2_AchFIID + FinanceItems 联合：'DocKey|WHID|DocID' -> "FIID|FINO|FIName|HSTag|HSTagName|FITag"
-'   原 t_FVou_M.Init() 里加载到 mrsDocFIRel 的内容
-'   NULL 在 key 中统一规范化为 ''
-'------------------------------------------------------------------------------
-Private m_dctDocFI      As Object
-
-'------------------------------------------------------------------------------
-' F_VouCls_Bills：'BillType|BillSubType' -> "vcid"
-'   t_FVou_M.CreateVou 里查 vcid 用
-'------------------------------------------------------------------------------
-Private m_dctVCBills    As Object
-
-'------------------------------------------------------------------------------
-' 状态
-'------------------------------------------------------------------------------
 Private m_blnLoaded     As Boolean
 
 
@@ -104,19 +74,21 @@ On Error GoTo ErrH
           "FROM   FinanceItems WITH(NOLOCK) WHERE ISNULL(FIID,'')<>''"
     Set rs = objDS.OpenRecordsetBySQL(SQL, True, True)
     Do While Not rs.EOF
-        m_dctFI.Add CStr(rs.Fields("FIID").Value), _
-            objDS.NullToStr(rs.Fields("FINO").Value) & "|" & _
-            objDS.NullToStr(rs.Fields("FIName").Value) & "|" & _
-            IIf(objDS.NullToBool(rs.Fields("ISStop").Value), "1", "0") & "|" & _
-            CStr(CLng(objDS.NullToDbl(rs.Fields("FITag").Value))) & "|" & _
-            CStr(CLng(objDS.NullToDbl(rs.Fields("EXPTAG").Value))) & "|" & _
-            CStr(CLng(objDS.NullToDbl(rs.Fields("HSTag").Value))) & "|" & _
-            objDS.NullToStr(rs.Fields("HSTagName").Value) & "|" & _
-            IIf(objDS.NullToBool(rs.Fields("baNum").Value), "1", "0") & "|" & _
-            IIf(objDS.NullToBool(rs.Fields("baCust").Value), "1", "0") & "|" & _
-            IIf(objDS.NullToBool(rs.Fields("baSupp").Value), "1", "0") & "|" & _
-            IIf(objDS.NullToBool(rs.Fields("baOtherCorp").Value), "1", "0") & "|" & _
-            objDS.NullToStr(rs.Fields("FullName").Value)
+        Dim dctFIRow As Object
+        Set dctFIRow = CreateObject("Scripting.Dictionary")
+        dctFIRow.Add "FINO",        objDS.NullToStr(rs.Fields("FINO").Value)
+        dctFIRow.Add "FIName",      objDS.NullToStr(rs.Fields("FIName").Value)
+        dctFIRow.Add "ISStop",      objDS.NullToBool(rs.Fields("ISStop").Value)
+        dctFIRow.Add "FITag",       CLng(objDS.NullToDbl(rs.Fields("FITag").Value))
+        dctFIRow.Add "EXPTAG",      CLng(objDS.NullToDbl(rs.Fields("EXPTAG").Value))
+        dctFIRow.Add "HSTag",       CLng(objDS.NullToDbl(rs.Fields("HSTag").Value))
+        dctFIRow.Add "HSTagName",   objDS.NullToStr(rs.Fields("HSTagName").Value)
+        dctFIRow.Add "baNum",       objDS.NullToBool(rs.Fields("baNum").Value)
+        dctFIRow.Add "baCust",      objDS.NullToBool(rs.Fields("baCust").Value)
+        dctFIRow.Add "baSupp",      objDS.NullToBool(rs.Fields("baSupp").Value)
+        dctFIRow.Add "baOtherCorp", objDS.NullToBool(rs.Fields("baOtherCorp").Value)
+        dctFIRow.Add "FullName",    objDS.NullToStr(rs.Fields("FullName").Value)
+        m_dctFI.Add CStr(rs.Fields("FIID").Value), dctFIRow
         rs.MoveNext
     Loop
     Call objDS.rs_Close(rs)
@@ -127,9 +99,11 @@ On Error GoTo ErrH
     SQL = "SELECT CorpID, Contact, CorpName FROM Corp WITH(NOLOCK)"
     Set rs = objDS.OpenRecordsetBySQL(SQL, True, True)
     Do While Not rs.EOF
-        m_dctCorp.Add CStr(rs.Fields("CorpID").Value), _
-            IIf(objDS.NullToBool(rs.Fields("Contact").Value), "1", "0") & "|" & _
-            objDS.NullToStr(rs.Fields("CorpName").Value)
+        Dim dctCorpRow As Object
+        Set dctCorpRow = CreateObject("Scripting.Dictionary")
+        dctCorpRow.Add "Contact",  objDS.NullToBool(rs.Fields("Contact").Value)
+        dctCorpRow.Add "CorpName", objDS.NullToStr(rs.Fields("CorpName").Value)
+        m_dctCorp.Add CStr(rs.Fields("CorpID").Value), dctCorpRow
         rs.MoveNext
     Loop
     Call objDS.rs_Close(rs)
@@ -140,9 +114,11 @@ On Error GoTo ErrH
     SQL = "SELECT EmpID, dismission, EmpName FROM Emp WITH(NOLOCK)"
     Set rs = objDS.OpenRecordsetBySQL(SQL, True, True)
     Do While Not rs.EOF
-        m_dctEmp.Add CStr(rs.Fields("EmpID").Value), _
-            IIf(objDS.NullToBool(rs.Fields("dismission").Value), "1", "0") & "|" & _
-            objDS.NullToStr(rs.Fields("EmpName").Value)
+        Dim dctEmpRow As Object
+        Set dctEmpRow = CreateObject("Scripting.Dictionary")
+        dctEmpRow.Add "dismission", objDS.NullToBool(rs.Fields("dismission").Value)
+        dctEmpRow.Add "EmpName",    objDS.NullToStr(rs.Fields("EmpName").Value)
+        m_dctEmp.Add CStr(rs.Fields("EmpID").Value), dctEmpRow
         rs.MoveNext
     Loop
     Call objDS.rs_Close(rs)
@@ -153,9 +129,11 @@ On Error GoTo ErrH
     SQL = "SELECT AccID, ISStop, AccName FROM Account WITH(NOLOCK)"
     Set rs = objDS.OpenRecordsetBySQL(SQL, True, True)
     Do While Not rs.EOF
-        m_dctAcc.Add CStr(rs.Fields("AccID").Value), _
-            IIf(objDS.NullToBool(rs.Fields("ISStop").Value), "1", "0") & "|" & _
-            objDS.NullToStr(rs.Fields("AccName").Value)
+        Dim dctAccRow As Object
+        Set dctAccRow = CreateObject("Scripting.Dictionary")
+        dctAccRow.Add "ISStop",  objDS.NullToBool(rs.Fields("ISStop").Value)
+        dctAccRow.Add "AccName", objDS.NullToStr(rs.Fields("AccName").Value)
+        m_dctAcc.Add CStr(rs.Fields("AccID").Value), dctAccRow
         rs.MoveNext
     Loop
     Call objDS.rs_Close(rs)
@@ -169,20 +147,25 @@ On Error GoTo ErrH
           "FROM   AccPeriod WITH(NOLOCK) ORDER BY BeginDate"
     Set rs = objDS.OpenRecordsetBySQL(SQL, True, True)
     m_lngAPCount = 0
-    ReDim m_arrAPID(0 To 1023)                          ' 预分配
+    ReDim m_arrAPID(0 To 1023)
     Do While Not rs.EOF
         Dim sAPID As String
         sAPID = CStr(rs.Fields("APID").Value)
-        m_dctAP.Add sAPID, _
-            Format$(rs.Fields("BeginDate").Value, "yyyy-MM-dd") & "|" & _
-            Format$(rs.Fields("EndDate").Value, "yyyy-MM-dd") & "|" & _
-            CStr(CLng(rs.Fields("APTag").Value)) & "|" & _
-            CStr(CLng(rs.Fields("FOAPTag").Value))
-        If m_lngAPCount > UBound(m_arrAPID) Then
-            ReDim Preserve m_arrAPID(0 To UBound(m_arrAPID) * 2)
+        Dim dctAPRow As Object
+        Set dctAPRow = CreateObject("Scripting.Dictionary")
+        ' BeginDate / EndDate 用字符串 "yyyy-MM-dd" 存，便于直接字符串比较
+        dctAPRow.Add "BeginDate", Format$(rs.Fields("BeginDate").Value, "yyyy-MM-dd")
+        dctAPRow.Add "EndDate",   Format$(rs.Fields("EndDate").Value, "yyyy-MM-dd")
+        dctAPRow.Add "APTag",     CLng(rs.Fields("APTag").Value)
+        dctAPRow.Add "FOAPTag",   CLng(rs.Fields("FOAPTag").Value)
+        m_dctAP.Add sAPID, dctAPRow
+
+        If m_lngAPCount >= UBound(m_arrAPID) Then
+            ReDim Preserve m_arrAPID(0 To (UBound(m_arrAPID) + 1) * 2 - 1)
         End If
         m_arrAPID(m_lngAPCount) = sAPID
         m_lngAPCount = m_lngAPCount + 1
+
         If CLng(rs.Fields("APTag").Value) = 2 Then
             m_strActiveAPID_APTag = sAPID
         End If
@@ -194,7 +177,7 @@ On Error GoTo ErrH
     Call objDS.rs_Close(rs)
 
     '--------------------------------------------------------------------------
-    ' 6) GL2_AchFIID + FinanceItems 联合（同 t_FVou_M.Init）
+    ' 6) GL2_AchFIID + FinanceItems 联合
     '--------------------------------------------------------------------------
     SQL = "SELECT ISNULL(D.dockey,'')      AS dockey," & vbCrLf & _
           "       ISNULL(D.DocID,'')       AS DocID," & vbCrLf & _
@@ -209,19 +192,23 @@ On Error GoTo ErrH
           "WHERE  ISNULL(D.FIID,'')<>''"
     Set rs = objDS.OpenRecordsetBySQL(SQL, True, True)
     Do While Not rs.EOF
+        ' DocKey / WHID / DocID 都是 ID 字段（varchar(40~48)，纯 ASCII 标识符）
+        ' 不会出现 "|"，可以安全用 "|" 拼 key
         Dim sKey As String
-        sKey = CStr(rs.Fields("dockey").Value) & "|" & _
-               CStr(rs.Fields("WHID").Value) & "|" & _
+        sKey = CStr(rs.Fields("dockey").Value) & Chr$(31) & _
+               CStr(rs.Fields("WHID").Value) & Chr$(31) & _
                CStr(rs.Fields("DocID").Value)
-        ' 同 key 重复时保留首条（与原 ADO Filter 行为一致：取第一行命中）
+        ' 同 key 重复时保留首条（与原 ADO Filter 行为一致）
         If Not m_dctDocFI.Exists(sKey) Then
-            m_dctDocFI.Add sKey, _
-                CStr(rs.Fields("FIID").Value) & "|" & _
-                objDS.NullToStr(rs.Fields("FINo").Value) & "|" & _
-                objDS.NullToStr(rs.Fields("FIName").Value) & "|" & _
-                CStr(CLng(objDS.NullToDbl(rs.Fields("HSTag").Value))) & "|" & _
-                objDS.NullToStr(rs.Fields("HSTagName").Value) & "|" & _
-                CStr(CLng(objDS.NullToDbl(rs.Fields("FITag").Value)))
+            Dim dctDocRow As Object
+            Set dctDocRow = CreateObject("Scripting.Dictionary")
+            dctDocRow.Add "FIID",      CStr(rs.Fields("FIID").Value)
+            dctDocRow.Add "FINO",      objDS.NullToStr(rs.Fields("FINo").Value)
+            dctDocRow.Add "FIName",    objDS.NullToStr(rs.Fields("FIName").Value)
+            dctDocRow.Add "HSTag",     CLng(objDS.NullToDbl(rs.Fields("HSTag").Value))
+            dctDocRow.Add "HSTagName", objDS.NullToStr(rs.Fields("HSTagName").Value)
+            dctDocRow.Add "FITag",     CLng(objDS.NullToDbl(rs.Fields("FITag").Value))
+            m_dctDocFI.Add sKey, dctDocRow
         End If
         rs.MoveNext
     Loop
@@ -234,8 +221,10 @@ On Error GoTo ErrH
           "WHERE ISNULL(VCID,'')<>''"
     Set rs = objDS.OpenRecordsetBySQL(SQL, True, True)
     Do While Not rs.EOF
+        ' BillType 是 BillKey 标识符（如 "PGBill"/"SSBill"），无 "|"
+        ' BillSubType 也是枚举，无 "|"
         Dim sk As String
-        sk = CStr(rs.Fields("BillType").Value) & "|" & _
+        sk = CStr(rs.Fields("BillType").Value) & Chr$(31) & _
              objDS.NullToStr(rs.Fields("BillSubType").Value)
         If Not m_dctVCBills.Exists(sk) Then
             m_dctVCBills.Add sk, CStr(rs.Fields("vcid").Value)
@@ -248,8 +237,13 @@ On Error GoTo ErrH
     Exit Sub
 
 ErrH:
+    Dim lngE As Long, sDesc As String
+    lngE = Err.Number
+    sDesc = Err.Description
+    On Error Resume Next
     Call ClearAll
-    Call Err.Raise(Err.Number, , Err.Description)
+    On Error GoTo 0
+    Call Err.Raise(lngE, , sDesc)
 End Sub
 
 
@@ -257,6 +251,7 @@ End Sub
 ' Public：清理缓存（batch 末尾调用）
 '==============================================================================
 Public Sub ClearAll()
+    On Error Resume Next
     Set m_dctFI = Nothing
     Set m_dctCorp = Nothing
     Set m_dctEmp = Nothing
@@ -269,13 +264,13 @@ Public Sub ClearAll()
     m_strActiveAPID_APTag = ""
     m_strActiveAPID_FOAPTag = ""
     m_blnLoaded = False
+    On Error GoTo 0
 End Sub
 
 
 '==============================================================================
 ' Public：FinanceItems 查找
-'   返回 True = 找到，并通过 ByRef 输出各字段
-'   返回 False = 未找到（调用方应回退到 DB 或抛错，与原行为一致）
+'   返回 True = 找到；False = 未找到（调用方应回退到 DB）
 '==============================================================================
 Public Function TryGetFI(ByVal sFIID As String, _
                         ByRef rtnFINO As String, ByRef rtnFIName As String, _
@@ -288,20 +283,20 @@ Public Function TryGetFI(ByVal sFIID As String, _
     If Not m_blnLoaded Then Exit Function
     If Not m_dctFI.Exists(sFIID) Then Exit Function
 
-    Dim p() As String
-    p = Split(CStr(m_dctFI(sFIID)), "|")
-    rtnFINO = p(0)
-    rtnFIName = p(1)
-    rtnIsStop = (p(2) = "1")
-    rtnFITag = CLng(p(3))
-    rtnEXPTAG = CLng(p(4))
-    rtnHSTag = CLng(p(5))
-    rtnHSTagName = p(6)
-    rtnBaNum = (p(7) = "1")
-    rtnBaCust = (p(8) = "1")
-    rtnBaSupp = (p(9) = "1")
-    rtnBaOtherCorp = (p(10) = "1")
-    If UBound(p) >= 11 Then rtnFullName = p(11)
+    Dim d As Object
+    Set d = m_dctFI(sFIID)
+    rtnFINO = CStr(d("FINO"))
+    rtnFIName = CStr(d("FIName"))
+    rtnIsStop = CBool(d("ISStop"))
+    rtnFITag = CLng(d("FITag"))
+    rtnEXPTAG = CLng(d("EXPTAG"))
+    rtnHSTag = CLng(d("HSTag"))
+    rtnHSTagName = CStr(d("HSTagName"))
+    rtnBaNum = CBool(d("baNum"))
+    rtnBaCust = CBool(d("baCust"))
+    rtnBaSupp = CBool(d("baSupp"))
+    rtnBaOtherCorp = CBool(d("baOtherCorp"))
+    rtnFullName = CStr(d("FullName"))
     TryGetFI = True
 End Function
 
@@ -315,10 +310,10 @@ Public Function TryGetCorp(ByVal sCorpID As String, _
     If Not m_blnLoaded Then Exit Function
     If Not m_dctCorp.Exists(sCorpID) Then Exit Function
 
-    Dim p() As String
-    p = Split(CStr(m_dctCorp(sCorpID)), "|")
-    rtnContact = (p(0) = "1")
-    rtnCorpName = p(1)
+    Dim d As Object
+    Set d = m_dctCorp(sCorpID)
+    rtnContact = CBool(d("Contact"))
+    rtnCorpName = CStr(d("CorpName"))
     TryGetCorp = True
 End Function
 
@@ -332,10 +327,10 @@ Public Function TryGetEmp(ByVal sEmpID As String, _
     If Not m_blnLoaded Then Exit Function
     If Not m_dctEmp.Exists(sEmpID) Then Exit Function
 
-    Dim p() As String
-    p = Split(CStr(m_dctEmp(sEmpID)), "|")
-    rtnDismission = (p(0) = "1")
-    rtnEmpName = p(1)
+    Dim d As Object
+    Set d = m_dctEmp(sEmpID)
+    rtnDismission = CBool(d("dismission"))
+    rtnEmpName = CStr(d("EmpName"))
     TryGetEmp = True
 End Function
 
@@ -349,10 +344,10 @@ Public Function TryGetAcc(ByVal sAccID As String, _
     If Not m_blnLoaded Then Exit Function
     If Not m_dctAcc.Exists(sAccID) Then Exit Function
 
-    Dim p() As String
-    p = Split(CStr(m_dctAcc(sAccID)), "|")
-    rtnIsStop = (p(0) = "1")
-    rtnAccName = p(1)
+    Dim d As Object
+    Set d = m_dctAcc(sAccID)
+    rtnIsStop = CBool(d("ISStop"))
+    rtnAccName = CStr(d("AccName"))
     TryGetAcc = True
 End Function
 
@@ -360,7 +355,7 @@ End Function
 '==============================================================================
 ' Public：根据日期查找包含它的 AccPeriod
 '   等价于：SELECT APID, APTag/FOAPTag FROM AccPeriod WHERE BeginDate<=? AND EndDate>=?
-'   useFOAPTag=True 表示读 FOAPTag 字段（GL2_ERPFODiffCarry=True 场景）
+'   useFOAPTag=True 表示读 FOAPTag 字段
 '==============================================================================
 Public Function TryGetAPByDate(ByVal vDate As Date, ByVal useFOAPTag As Boolean, _
                               ByRef rtnAPID As String, ByRef rtnAPTag As Long) As Boolean
@@ -369,18 +364,17 @@ Public Function TryGetAPByDate(ByVal vDate As Date, ByVal useFOAPTag As Boolean,
     Dim sDate As String
     sDate = Format$(vDate, "yyyy-MM-dd")
 
-    ' 线性扫描（AccPeriod 通常 < 50 行）
     Dim i As Long
     For i = 0 To m_lngAPCount - 1
-        Dim p() As String
-        p = Split(CStr(m_dctAP(m_arrAPID(i))), "|")
-        ' p(0)=BeginDate, p(1)=EndDate, p(2)=APTag, p(3)=FOAPTag
-        If sDate >= p(0) And sDate <= p(1) Then
+        Dim d As Object
+        Set d = m_dctAP(m_arrAPID(i))
+        ' 字符串 "yyyy-MM-dd" 直接比较等价于日期比较
+        If sDate >= CStr(d("BeginDate")) And sDate <= CStr(d("EndDate")) Then
             rtnAPID = m_arrAPID(i)
             If useFOAPTag Then
-                rtnAPTag = CLng(p(3))
+                rtnAPTag = CLng(d("FOAPTag"))
             Else
-                rtnAPTag = CLng(p(2))
+                rtnAPTag = CLng(d("APTag"))
             End If
             TryGetAPByDate = True
             Exit Function
@@ -390,7 +384,7 @@ End Function
 
 
 '==============================================================================
-' Public：当前活动 AccPeriod 是否存在（APTag=2 或 FOAPTag=2）
+' Public：当前活动 AccPeriod 是否存在
 '==============================================================================
 Public Function HasActiveAP(ByVal useFOAPTag As Boolean) As Boolean
     If Not m_blnLoaded Then Exit Function
@@ -414,17 +408,17 @@ Public Function TryGetDocFI(ByVal sDocKey As String, ByVal sWHID As String, _
     If Not m_blnLoaded Then Exit Function
 
     Dim sKey As String
-    sKey = sDocKey & "|" & sWHID & "|" & sDocID
+    sKey = sDocKey & Chr$(31) & sWHID & Chr$(31) & sDocID
     If Not m_dctDocFI.Exists(sKey) Then Exit Function
 
-    Dim p() As String
-    p = Split(CStr(m_dctDocFI(sKey)), "|")
-    rtnFIID = p(0)
-    rtnFINO = p(1)
-    rtnFIName = p(2)
-    rtnHSTag = CLng(p(3))
-    rtnHSTagName = p(4)
-    rtnFITag = CLng(p(5))
+    Dim d As Object
+    Set d = m_dctDocFI(sKey)
+    rtnFIID = CStr(d("FIID"))
+    rtnFINO = CStr(d("FINO"))
+    rtnFIName = CStr(d("FIName"))
+    rtnHSTag = CLng(d("HSTag"))
+    rtnHSTagName = CStr(d("HSTagName"))
+    rtnFITag = CLng(d("FITag"))
     TryGetDocFI = True
 End Function
 
@@ -437,14 +431,14 @@ Public Function TryGetVCID(ByVal sBillType As String, ByVal sBillSubType As Stri
     If Not m_blnLoaded Then Exit Function
 
     Dim sk As String
-    sk = sBillType & "|" & sBillSubType
+    sk = sBillType & Chr$(31) & sBillSubType
     If m_dctVCBills.Exists(sk) Then
         rtnVCID = CStr(m_dctVCBills(sk))
         TryGetVCID = True
         Exit Function
     End If
     ' BillSubType 为空也应能查到（原 SQL 中 BillSubType IS NULL 视同 ''）
-    sk = sBillType & "|"
+    sk = sBillType & Chr$(31)
     If m_dctVCBills.Exists(sk) Then
         rtnVCID = CStr(m_dctVCBills(sk))
         TryGetVCID = True

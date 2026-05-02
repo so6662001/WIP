@@ -34,9 +34,21 @@ def strip_comments(line: str) -> str:
 def tokenize(path: Path):
     raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     out = []
-    for i, raw in enumerate(raw_lines, 1):
-        line = strip_comments(raw).strip()
-        out.append((i, raw, line))
+    # VB6 line continuation: trailing " _" merges with next line
+    i = 0
+    while i < len(raw_lines):
+        line_no = i + 1
+        raw = raw_lines[i]
+        line = strip_comments(raw).rstrip()
+        # 合并续行（直到末尾不再是 " _"）
+        while line.endswith(" _"):
+            line = line[:-2].rstrip()
+            i += 1
+            if i >= len(raw_lines):
+                break
+            line = line + " " + strip_comments(raw_lines[i]).strip()
+        out.append((line_no, raw, line.strip()))
+        i += 1
     return out
 
 

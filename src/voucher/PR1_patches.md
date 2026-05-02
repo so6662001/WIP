@@ -139,120 +139,208 @@ End Sub
 
 ---
 
-## Patch 3：`t_FVou_M.cls` — `GetFIIDByPrdt` 优先走缓存
+## Patch 3：`t_FVou_M.cls` — 16 个 GetFIIDBy* 函数 cache 路径
 
-### 修改前
+每个函数在原代码**第一行**加 cache 路径调用 helper。helper 已在 `VouCacheHelpers.bas` 组 B 中实现完整 5 步 / 2 步 fallback 逻辑（含 ParentCls 走 cache）。
 
-```vb
-Public Function GetFIIDByPrdt(ByVal objDS As HHDataService.sysDataService, ByVal DocKey As String, ByVal DocCHName As String, _
-                            ByVal WHID As String, ByVal WHName As String, ByVal ClsID As String, ByVal ClsName As String, _
-                            ByRef rtnFINO As String, ByRef rtnFIName As String) As String
-    If mrsDocFIRel Is Nothing Then
-        Call Init(objDS, DocKey)       '初始化
-    End If
-    
-    mrsDocFIRel.Filter = "DocKey='" & DocKey & "' AND WHID='" & WHID & "' AND DOCID='" & ClsID & "'"
-    
-    '再查询仓库
-    If mrsDocFIRel.RecordCount = 0 Then
-        mrsDocFIRel.Filter = "(DocKey='" & DocKey & "' AND WHID='" & WHID & "' AND DOCID='') or (DocKey='" & DocKey & "' AND WHID='" & WHID & "' AND DOCID=NULL)"
-    End If
-    ...
-End Function
-```
-
-### 修改后
+### Patch 3-1：`GetFIIDByPrdt` (5 步严格)
 
 ```vb
-Public Function GetFIIDByPrdt(ByVal objDS As HHDataService.sysDataService, ByVal DocKey As String, ByVal DocCHName As String, _
-                            ByVal WHID As String, ByVal WHName As String, ByVal ClsID As String, ByVal ClsName As String, _
-                            ByRef rtnFINO As String, ByRef rtnFIName As String) As String
-    
-    ' === PR-1 新增：缓存路径，等价于原 4 步 Filter 查找的精确-到-空 fallback ===
-    If VouMetaCache.IsLoaded Then
-        Dim sFIID As String
-        Dim sHSTagName As String
-        Dim lngHSTag As Long, lngFITag As Long
-        
-        ' Step 1: DocKey + WHID + ClsID 精确
-        If VouMetaCache.TryGetDocFI(DocKey, WHID, ClsID, sFIID, rtnFINO, rtnFIName, lngHSTag, sHSTagName, lngFITag) Then
-            GetFIIDByPrdt = sFIID
-            Exit Function
-        End If
-        ' Step 2: DocKey + WHID + DOCID=''
-        If VouMetaCache.TryGetDocFI(DocKey, WHID, "", sFIID, rtnFINO, rtnFIName, lngHSTag, sHSTagName, lngFITag) Then
-            GetFIIDByPrdt = sFIID
-            Exit Function
-        End If
-        ' Step 3: DocKey + WHID='' + DOCID=ClsID
-        If VouMetaCache.TryGetDocFI(DocKey, "", ClsID, sFIID, rtnFINO, rtnFIName, lngHSTag, sHSTagName, lngFITag) Then
-            GetFIIDByPrdt = sFIID
-            Exit Function
-        End If
-        ' Step 4: 上级品类（必须查 DB，因为依赖 getPrdtClsTree 函数）
-        Dim strFIIDFromParent As String
-        strFIIDFromParent = getFIIDByClsIDFromParentCls(objDS, DocKey, WHID, ClsID, rtnFINO, rtnFIName)
-        If strFIIDFromParent <> "" Then
-            GetFIIDByPrdt = strFIIDFromParent
-            Exit Function
-        End If
-        ' Step 5: 全空
-        If VouMetaCache.TryGetDocFI(DocKey, "", "", sFIID, rtnFINO, rtnFIName, lngHSTag, sHSTagName, lngFITag) Then
-            GetFIIDByPrdt = sFIID
-            Exit Function
-        End If
-        Call Err.Raise(ERROR_FORSYSTEM, , WHName & " 的 " & ClsName & " 尚未设置" & DocCHName & "会计科目，无法生成记账凭证！")
+Public Function GetFIIDByPrdt(ByVal objDS As HHDataService.sysDataService, _
+                              ByVal DocKey As String, ByVal DocCHName As String, _
+                              ByVal WHID As String, ByVal WHName As String, _
+                              ByVal ClsID As String, ByVal ClsName As String, _
+                              ByRef rtnFINO As String, ByRef rtnFIName As String) As String
+
+    ' === PR-1 cache fast path ===
+    Dim sFIID As String
+    If VouCacheHelpers.LookupDocFI_5Step(objDS, DocKey, DocCHName, WHID, WHName, _
+                                         ClsID, ClsName, True, _
+                                         sFIID, rtnFINO, rtnFIName) Then
+        GetFIIDByPrdt = sFIID
         Exit Function
     End If
-    
-    ' === 原路径（VouMetaCache 未加载时回退）===
+
+    ' === 原路径（cache 未加载）保持不变 ===
     If mrsDocFIRel Is Nothing Then
         Call Init(objDS, DocKey)
     End If
-    
-    mrsDocFIRel.Filter = "DocKey='" & DocKey & "' AND WHID='" & WHID & "' AND DOCID='" & ClsID & "'"
-    
-    '再查询仓库
-    If mrsDocFIRel.RecordCount = 0 Then
-        mrsDocFIRel.Filter = "(DocKey='" & DocKey & "' AND WHID='" & WHID & "' AND DOCID='') or (DocKey='" & DocKey & "' AND WHID='" & WHID & "' AND DOCID=NULL)"
-    End If
-    
-    '再查询货品类别
-    If mrsDocFIRel.RecordCount = 0 Then
-        mrsDocFIRel.Filter = "(DocKey='" & DocKey & "' AND DOCID='" & ClsID & "' AND WHID='') OR (DocKey='" & DocKey & "' AND DOCID='" & ClsID & "' AND WHID=NULL)"
-    End If
-    
-    '查询其上级品类的会计科目
-    Dim strFIID As String
-    If mrsDocFIRel.RecordCount = 0 Then
-        strFIID = getFIIDByClsIDFromParentCls(objDS, DocKey, WHID, ClsID, rtnFINO, rtnFIName)
-    End If
-    
-    If strFIID = "" Then
-        '再查询空的
-        If mrsDocFIRel.RecordCount = 0 Then
-            mrsDocFIRel.Filter = "DocKey='" & DocKey & "' AND WHID='' AND DOCID=''"
-        End If
-        
-        If mrsDocFIRel.RecordCount > 0 Then
-            rtnFINO = mrsDocFIRel.Fields("FINO").Value
-            rtnFIName = getFIName(objDS, mrsDocFIRel.Fields("FIID").Value, mrsDocFIRel.Fields("FIName").Value, "", mrsMemoryFI)
-            
-            GetFIIDByPrdt = mrsDocFIRel.Fields("FIID").Value
-            
-            If Not mrsWHClsFI Is Nothing Then
-                ' ... 原代码
-            End If
-        Else
-            Call Err.Raise(ERROR_FORSYSTEM, , WHName & " 的 " & ClsName & " 尚未设置" & DocCHName & "会计科目，无法生成记账凭证！")
-        End If
-    Else
-        GetFIIDByPrdt = strFIID
-    End If
+    ' ...原代码全部保留...
 End Function
 ```
 
-> **同样的方式也要应用到** `GetFIIDByPrdt1` / `GetFIIDByKey` / `GetAccFIID` / `GetCGExpYFZKFIID` / `GetFactYJTax_XXFIID` / `GetFactYJTax_JXFIID` / `GetYJTax_TInvFIID` / `GetYJTax_XXFIID` / `GetYJTax_JXFIID`：每个函数前面加上"如果 VouMetaCache.IsLoaded 则按缓存路径处理"分支。详见 `t_FVou_M_PR1_cache.bas`。
+### Patch 3-2：`GetFIIDByPrdt1` (4 步非严格)
+
+```vb
+Public Function GetFIIDByPrdt1(ByVal objDS As HHDataService.sysDataService, _
+                               ByVal DocKey As String, ByVal DocCHName As String, _
+                               ByVal WHID As String, ByVal WHName As String, _
+                               ByVal ClsID As String, ByVal ClsName As String, _
+                               ByRef rtnFINO As String, ByRef rtnFIName As String) As String
+
+    ' === PR-1 cache fast path（isStrict=False，找不到不抛错）===
+    Dim sFIID As String
+    If VouCacheHelpers.LookupDocFI_5Step(objDS, DocKey, DocCHName, WHID, WHName, _
+                                         ClsID, ClsName, False, _
+                                         sFIID, rtnFINO, rtnFIName) Then
+        GetFIIDByPrdt1 = sFIID
+        Exit Function
+    End If
+
+    ' === 原路径保持不变 ===
+End Function
+```
+
+### Patch 3-3：`getFIIDByClsIDFromParentCls`（被 5 步调用，必须改）
+
+```vb
+Private Function getFIIDByClsIDFromParentCls(ByVal objDS As HHDataService.sysDataService, _
+                                             ByVal DocKey As String, ByVal WHID As String, _
+                                             ByVal ClsID As String, _
+                                             ByRef rtnFINO As String, ByRef rtnFIName As String) As String
+    ' === PR-1 cache fast path ===
+    If VouMetaCache.IsLoaded Then
+        Dim sFIID As String
+        If VouCacheHelpers.LookupDocFI_ParentCls(objDS, DocKey, WHID, ClsID, _
+                                                 sFIID, rtnFINO, rtnFIName) Then
+            getFIIDByClsIDFromParentCls = sFIID
+        End If
+        Exit Function
+    End If
+
+    ' === 原路径保持不变 ===
+End Function
+```
+
+### Patch 3-4：其它包装函数无需修改
+
+`GetKCFIID` / `GetIRILFIID` / `GetIJFIID` / `GetSSATMFIID` / `GetSSCostFIID` / `GetMFCostFIID` 都是简单包装，内部调用 `GetFIIDByPrdt` / `GetFIIDByPrdt1`，**自动受益于 Patch 3-1/3-2**，无需单独修改。
+
+### Patch 3-5：`GetAccFIID` (DocKey+DocID 两步严格)
+
+```vb
+Public Function GetAccFIID(ByVal objDS As HHDataService.sysDataService, _
+                           ByVal AccID As String, ByVal AccName As String, _
+                           ByRef rtnFINO As String, ByRef rtnFIName As String) As String
+    ' === PR-1 cache fast path ===
+    Dim sFIID As String
+    If VouCacheHelpers.LookupDocFI_KeyOnly(objDS, "Account", "货币资金", _
+                                           AccID, AccName, _
+                                           True, AccName & " 尚未设置货币资金会计科目，无法生成记账凭证！", _
+                                           sFIID, rtnFINO, rtnFIName) Then
+        GetAccFIID = sFIID
+        Exit Function
+    End If
+
+    ' === 原路径保持不变 ===
+End Function
+```
+
+### Patch 3-6：`GetCGExpYFZKFIID`
+
+```vb
+Public Function GetCGExpYFZKFIID(...) As String
+    Dim sFIID As String
+    If VouCacheHelpers.LookupDocFI_KeyOnly(objDS, "CGExpFI", "采购费用", _
+                                           CGExpID, CGExpName, _
+                                           True, CGExpName & " 尚未设置采购费用会计科目，无法生成记账凭证！", _
+                                           sFIID, rtnFINO, rtnFIName) Then
+        GetCGExpYFZKFIID = sFIID
+        Exit Function
+    End If
+    ' === 原路径保持不变 ===
+End Function
+```
+
+### Patch 3-7 ~ 3-10：`GetFactYJTax_XXFIID` / `GetFactYJTax_JXFIID` / `GetYJTax_XXFIID` / `GetYJTax_JXFIID`
+
+这 4 个函数内部都需要先判 `Me.AppParameters.YJTaxFIIDByTInvID = False` 直接返回常量，再判 `TInvID = ""`返回空，**这两个早期 return 必须先判，再走 cache fast path**：
+
+```vb
+Public Function GetFactYJTax_XXFIID(...) As String
+    If Me.AppParameters.YJTaxFIIDByTInvID = False Then
+        GetFactYJTax_XXFIID = Me.AppParameters.GL2_YJTaxXFIID_F
+        Exit Function
+    End If
+    If TInvID = "" Then
+        rtnFINO = "": rtnFIName = "": GetFactYJTax_XXFIID = ""
+        Exit Function
+    End If
+
+    ' === PR-1 cache fast path ===
+    Dim sFIID As String
+    If VouCacheHelpers.LookupDocFI_KeyOnly(objDS, "TInvXXFact", "应交税费销项", _
+                                           TInvID, TInvName, _
+                                           True, TInvName & " 尚未设置应交税费销项会计科目，无法生成记账凭证！", _
+                                           sFIID, rtnFINO, rtnFIName) Then
+        GetFactYJTax_XXFIID = sFIID
+        Exit Function
+    End If
+
+    ' === 原路径保持不变 ===
+End Function
+```
+
+> 其它三个 `GetFactYJTax_JXFIID` / `GetYJTax_XXFIID` / `GetYJTax_JXFIID` 同模式，DocKey 分别为 `"TInvJXFact"` / `"TInvXX"` / `"TInvJX"`，错误文案见原代码。
+
+### Patch 3-11：`GetYJTax_TInvFIID`
+
+```vb
+Public Function GetYJTax_TInvFIID(...) As String
+    If TInvID = "" Then
+        rtnFINO = "": rtnFIName = "": GetYJTax_TInvFIID = ""
+        Exit Function
+    End If
+
+    ' === PR-1 cache fast path ===
+    Dim sFIID As String
+    If VouCacheHelpers.LookupDocFI_KeyOnly(objDS, DocKey, DocCHName, _
+                                           TInvID, TInvName, _
+                                           True, TInvName & " 尚未设置" & _
+                                           IIf(Me.AppParameters.GL2_UseJITIYJTax, "计提", "") & _
+                                           "应交税费" & DocCHName & "，无法生成记账凭证！", _
+                                           sFIID, rtnFINO, rtnFIName) Then
+        GetYJTax_TInvFIID = sFIID
+        Exit Function
+    End If
+
+    ' === 原路径保持不变 ===
+End Function
+```
+
+### Patch 3-12：`GetFIIDByKey`
+
+```vb
+Public Function GetFIIDByKey(..., Optional ByVal NotExistsRaiseErr As Boolean = True) As String
+    ' === PR-1 cache fast path ===
+    Dim sFIID As String
+    If VouCacheHelpers.LookupDocFI_KeyOnly(objDS, DocKey, DocCHName, _
+                                           DocID, DocName, _
+                                           NotExistsRaiseErr, _
+                                           DocName & " 尚未设置" & DocCHName & "会计科目，无法生成记账凭证！", _
+                                           sFIID, rtnFINO, rtnFIName) Then
+        GetFIIDByKey = sFIID
+        Exit Function
+    End If
+
+    ' === 原路径保持不变 ===
+End Function
+```
+
+### 总结：Patch 3 共影响 **12 处**
+
+| 函数 | 走的 helper |
+|---|---|
+| `GetFIIDByPrdt` | `LookupDocFI_5Step` (isStrict=True) |
+| `GetFIIDByPrdt1` | `LookupDocFI_5Step` (isStrict=False) |
+| `getFIIDByClsIDFromParentCls` | `LookupDocFI_ParentCls` |
+| `GetKCFIID` / `GetIRILFIID` / `GetIJFIID` / `GetSSATMFIID` / `GetSSCostFIID` / `GetMFCostFIID` | 包装函数，自动继承 |
+| `GetAccFIID` | `LookupDocFI_KeyOnly` |
+| `GetCGExpYFZKFIID` | `LookupDocFI_KeyOnly` |
+| `GetFactYJTax_XXFIID` / `GetFactYJTax_JXFIID` / `GetYJTax_XXFIID` / `GetYJTax_JXFIID` / `GetYJTax_TInvFIID` | `LookupDocFI_KeyOnly` (5 处) |
+| `GetFIIDByKey` | `LookupDocFI_KeyOnly` |
+
+> 任何 helper 返回 `False` 时（cache 未加载），调用方必须**保留原 mrsDocFIRel 路径完全不动**。这保证 cache 未启用时行为零变化。
 
 ---
 
