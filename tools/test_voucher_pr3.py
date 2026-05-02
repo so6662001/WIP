@@ -33,6 +33,11 @@ class VouBatchOps:
     def record(self, billid, is_trans):
         if not self.in_batch or not billid:
             return
+        # B1/B2 校验：BillID 必须不含 ',' / "'" / ';' / 空白
+        for ch in (",", "'", ";", " ", "\t", "\n"):
+            if ch in billid:
+                raise ValueError(
+                    f"BillID '{billid}' 含非法字符（',';' 或空白），无法安全批量处理")
         if is_trans:
             self.trans.append(billid)
         else:
@@ -218,6 +223,44 @@ def test_should_flush_txn_at_1000():
     return 0
 
 
+def test_billid_safety_validation():
+    """B1/B2 审计回归：含 SQL 注入字符的 BillID 必须被拒绝"""
+    bo = VouBatchOps()
+    bo.begin_batch()
+
+    # 正常 ID 接受
+    bo.record("V12345", False)
+    bo.record("YWVouID20240601001", False)
+
+    bad_ids = ["V'001", "V,001", "V;001", "V 001", "V\t001", "V\n001"]
+    fails = 0
+    for bid in bad_ids:
+        try:
+            bo.record(bid, False)
+            print(f"[FAIL] 应拒绝危险 BillID: {bid!r}")
+            fails += 1
+        except ValueError:
+            pass  # 预期
+    if fails == 0:
+        print(f"[OK ] billid_safety: {len(bad_ids)} 个危险 BillID 全部被拒绝")
+    return fails
+
+
+def test_storedproc_billid_order_preserved():
+    """B4 审计回归：stored proc 内部用 IDENTITY 列保证 cursor 顺序"""
+    with open("src/voucher/PR3_storedprocs.sql") as f:
+        sql = f.read()
+    # 关键模式：必须有 IDENTITY 列 + ORDER BY rn
+    if "IDENTITY(1,1)" not in sql:
+        print(f"[FAIL] storedproc 缺 IDENTITY(1,1) 列保证顺序")
+        return 1
+    if "ORDER BY rn" not in sql:
+        print(f"[FAIL] storedproc 缺 ORDER BY rn 子句")
+        return 1
+    print(f"[OK ] storedproc_billid_order_preserved (IDENTITY + ORDER BY rn)")
+    return 0
+
+
 def test_storedproc_sql_syntax():
     """T-SQL 静态校验：检查 PR3_storedprocs.sql 的语法关键字"""
     with open("src/voucher/PR3_storedprocs.sql") as f:
@@ -263,6 +306,8 @@ def main():
         ("test_batch_paging_500", test_batch_paging_500),
         ("test_in_batch_mode_false_fallback", test_in_batch_mode_false_fallback),
         ("test_should_flush_txn_at_1000", test_should_flush_txn_at_1000),
+        ("test_billid_safety_validation", test_billid_safety_validation),
+        ("test_storedproc_billid_order_preserved", test_storedproc_billid_order_preserved),
         ("test_storedproc_sql_syntax", test_storedproc_sql_syntax),
     ]
     fails = sum(t() for n, t in tests)

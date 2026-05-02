@@ -41,9 +41,13 @@ On Error GoTo ErrH
     If Not VouSchemaCache.IsLoaded Then Call VouSchemaCache.LoadAll(objDS)
 
     ' === PR-3 batch + 大事务包装 ===
+    ' 防御性：仅当外层无事务时启动；若已在事务中，依赖外层事务即可
     Call VouBatchOps.BeginBatch
+    On Error Resume Next
     Call objDS.BeginTrans
-    blnTxnStarted = True
+    blnTxnStarted = (Err.Number = 0)
+    Err.Clear
+    On Error GoTo ErrH
 
     If Me.AppParameters.PSBillAutoCreateVou Then Call objGL2.meCreVouForSS(objDS)
     If Me.HSObjectTag <> HSObjectAssPrdt Then

@@ -25,16 +25,18 @@ BEGIN
     DECLARE @x XML;
     SET @x = CAST('<x>' + REPLACE(@BillIDList, ',', '</x><x>') + '</x>' AS XML);
 
-    DECLARE @Tmp TABLE (BillID VARCHAR(48));
+    -- 用 IDENTITY 列保留传入顺序（XML.nodes 读取顺序未明确保证，
+    -- 但 INSERT INTO ... SELECT 内部仍按 nodes 文档顺序，配合 IDENTITY 即可保序）
+    DECLARE @Tmp TABLE (rn INT IDENTITY(1,1), BillID VARCHAR(48));
     INSERT INTO @Tmp (BillID)
     SELECT LTRIM(RTRIM(T.N.value('.', 'varchar(50)')))
     FROM   @x.nodes('/x') AS T(N)
     WHERE  LTRIM(RTRIM(T.N.value('.', 'varchar(50)'))) <> '';
 
-    -- 遍历调用原 stored proc，保证逻辑严格等价
+    -- 遍历调用原 stored proc，按传入顺序处理
     DECLARE @BillID VARCHAR(48);
     DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
-        SELECT BillID FROM @Tmp;
+        SELECT BillID FROM @Tmp ORDER BY rn;
     OPEN cur;
     FETCH NEXT FROM cur INTO @BillID;
     WHILE @@FETCH_STATUS = 0
@@ -66,7 +68,7 @@ BEGIN
     DECLARE @x XML;
     SET @x = CAST('<x>' + REPLACE(@BillIDList, ',', '</x><x>') + '</x>' AS XML);
 
-    DECLARE @Tmp TABLE (BillID VARCHAR(48));
+    DECLARE @Tmp TABLE (rn INT IDENTITY(1,1), BillID VARCHAR(48));
     INSERT INTO @Tmp (BillID)
     SELECT LTRIM(RTRIM(T.N.value('.', 'varchar(50)')))
     FROM   @x.nodes('/x') AS T(N)
@@ -74,7 +76,7 @@ BEGIN
 
     DECLARE @BillID VARCHAR(48);
     DECLARE cur CURSOR LOCAL FAST_FORWARD FOR
-        SELECT BillID FROM @Tmp;
+        SELECT BillID FROM @Tmp ORDER BY rn;
     OPEN cur;
     FETCH NEXT FROM cur INTO @BillID;
     WHILE @@FETCH_STATUS = 0

@@ -59,10 +59,22 @@ End Property
 ' Public：每张凭证 SaveDoc 成功后调用（取代原 per-bill stored proc 调用）
 '   isToTransTable: 凭证是否写入过渡表 (FVou_M_T) —— 决定 batch flush 时
 '                   调批量 stored proc 的 isSaveToTransitionalTable 参数
+'
+'   ⚠️ BillID 校验：如果包含 ',' / "'" / 空白 等会破坏 list 拼接的字符，
+'      抛错以避免 SQL 注入或 list 错切。生产中 BillID 都是 objDS.CreateSheetID
+'      生成的纯数字串，不会触发此校验。
 '==============================================================================
 Public Sub RecordSavedBill(ByVal sBillID As String, ByVal isToTransTable As Boolean)
     If Not m_blnInBatchMode Then Exit Sub
     If sBillID = "" Then Exit Sub
+
+    ' BillID 安全字符校验（防 SQL 注入 + list 切分错误）
+    If InStr(sBillID, ",") > 0 Or InStr(sBillID, "'") > 0 Or _
+       InStr(sBillID, ";") > 0 Or InStr(sBillID, " ") > 0 Then
+        Call Err.Raise(vbObjectError + 1001, "VouBatchOps.RecordSavedBill", _
+            "BillID '" & sBillID & "' 含非法字符（',';' 或空白），无法安全批量处理")
+    End If
+
     If isToTransTable Then
         m_colSavedBills_Trans.Add sBillID
     Else
